@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { View, Text, StyleSheet, Pressable } from "react-native";
+import { View, Text, StyleSheet, Pressable, TextInput, Keyboard } from "react-native";
 import Svg, { Circle, Line, Path } from "react-native-svg";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Location from "expo-location";
@@ -7,7 +7,18 @@ import MapBackground, { MapBackgroundHandle } from "../../components/MapBackgrou
 
 export default function HomeScreen() {
   const USER_FOCUS_ZOOM = 15;
+  const NEPAL_VIEWBOX_NOMINATIM = "80.058,30.447,88.201,26.347";
+  const NEPAL_BBOX_MAPTILER = "80.058,26.347,88.201,30.447";
   const mapRef = useRef<MapBackgroundHandle>(null);
+  const maptilerKey = process.env.EXPO_PUBLIC_MAPTILER_KEY;
+  const searchInputRef = useRef<TextInput>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [isSearchFocused, setIsSearchFocused] = useState(false);
+  const [searchSuggestions, setSearchSuggestions] = useState<SearchSuggestion[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const searchLookupId = useRef(0);
+  const searchAbortRef = useRef<AbortController | null>(null);
   const [initialCenter, setInitialCenter] = useState<{
     lng: number;
     lat: number;
@@ -28,6 +39,208 @@ export default function HomeScreen() {
   const [selectedPlaceError, setSelectedPlaceError] = useState<string | null>(null);
   const placeLookupId = useRef(0);
   const [locationError, setLocationError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (!isSearchFocused || query.length < 2) {
+      setSearchSuggestions([]);
+      setSearchLoading(false);
+      setSearchError(null);
+      searchAbortRef.current?.abort();
+      return;
+    }
+
+    const requestId = (searchLookupId.current += 1);
+    setSearchLoading(true);
+    setSearchError(null);
+
+    const controller = new AbortController();
+    searchAbortRef.current?.abort();
+    searchAbortRef.current = controller;
+
+    const timeoutId = setTimeout(async () => {
+      try {
+        const mapSuggestions = (items: SearchSuggestion[]) =>
+          items.filter(Boolean).slice(0, 5);
+
+        const fetchMapTilerSuggestions = async (preferNepal: boolean, q: string) => {
+          if (!maptilerKey) return [];
+          const params = new URLSearchParams({
+            key: maptilerKey,
+            limit: "5",
+            language: "en",
+            types:
+              "poi,address,place,locality,neighbourhood,road,postal_code,region,subregion,county,municipality,country",
+          });
+          if (preferNepal) {
+            params.set("country", "np");
+            params.set("bbox", NEPAL_BBOX_MAPTILER);
+          }
+          if (userCenter) {
+            params.set("proximity", `${userCenter.lng},${userCenter.lat}`);
+          }
+
+          const url = `https://api.maptiler.com/geocoding/${encodeURIComponent(
+            q
+          )}.json?${params.toString()}`;
+          const response = await fetch(url, {
+            signal: controller.signal,
+            headers: {
+              Accept: "application/json",
+            },
+          });
+
+          if (!response.ok) {
+            throw new Error(`Search failed (${response.status})`);
+          }
+
+          const data = await response.json();
+          const features = Array.isArray(data?.features) ? data.features : [];
+          return features
+            .map((feature: any) => {
+              const center = Array.isArray(feature?.center)
+                ? feature.center
+                : Array.isArray(feature?.geometry?.coordinates)
+                  ? feature.geometry.coordinates
+                  : null;
+              if (!center || center.length < 2) return null;
+              const [lng, lat] = center;
+              if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+              const title = feature?.text || feature?.place_name?.split(",")[0] || "Result";
+              const subtitle = feature?.place_name || null;
+              return {
+                id: String(feature?.id ?? `${lat},${lng}`),
+                title,
+                subtitle,
+                lat,
+                lng,
+              } as SearchSuggestion;
+            })
+            .filter(Boolean)
+            .slice(0, 5);
+        };
+
+        const fetchNominatimSuggestions = async (preferNepal: boolean, q: string) => {
+          const params = new URLSearchParams({
+            format: "jsonv2",
+            addressdetails: "1",
+            limit: "5",
+            q,
+          });
+
+          if (preferNepal) {
+            params.set("countrycodes", "np");
+            params.set("viewbox", NEPAL_VIEWBOX_NOMINATIM);
+            params.set("bounded", "0");
+          }
+
+          const url = `https://nominatim.openstreetmap.org/search?${params.toString()}`;
+          const response = await fetch(url, {
+            signal: controller.signal,
+            headers: {
+              Accept: "application/json",
+              "Accept-Language": "en",
+              // Replace with your app name + contact for production use.
+              "User-Agent": "RouteApp/1.0",
+            },
+          });
+
+          if (!response.ok) {
+            throw new Error(`Search failed (${response.status})`);
+          }
+
+          const data = await response.json();
+          return Array.isArray(data)
+            ? data
+                .map((item: any) => {
+                  const lat = Number(item?.lat);
+                  const lng = Number(item?.lon);
+                  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+                  const rawName = item?.name || "";
+                  const displayName = item?.display_name || "";
+                  const title = rawName || displayName.split(",")[0] || "Result";
+                  const subtitle =
+                    displayName && displayName !== title ? displayName : null;
+                  return {
+                    id: String(item?.place_id ?? `${lat},${lng}`),
+                    title,
+                    subtitle,
+                    lat,
+                    lng,
+                  } as SearchSuggestion;
+                })
+                .filter(Boolean)
+                .slice(0, 5)
+            : [];
+        };
+
+        const buildVariants = (q: string) => {
+          const variants: string[] = [q];
+          const expandedHospital = q.replace(/\bhos(p)?$/i, "hospital");
+          if (expandedHospital !== q) variants.push(expandedHospital);
+          if (q.includes(" ")) {
+            const trimmed = q.split(" ").slice(0, -1).join(" ").trim();
+            if (trimmed && trimmed !== q) variants.push(trimmed);
+          }
+          return Array.from(new Set(variants));
+        };
+
+        const variants = buildVariants(query);
+        let suggestions: SearchSuggestion[] = [];
+
+        for (const variant of variants) {
+          suggestions = mapSuggestions(
+            maptilerKey
+              ? await fetchMapTilerSuggestions(true, variant)
+              : await fetchNominatimSuggestions(true, variant)
+          );
+          if (searchLookupId.current !== requestId) return;
+          if (suggestions.length > 0) break;
+
+          suggestions = mapSuggestions(
+            maptilerKey
+              ? await fetchMapTilerSuggestions(false, variant)
+              : await fetchNominatimSuggestions(false, variant)
+          );
+          if (searchLookupId.current !== requestId) return;
+          if (suggestions.length > 0) break;
+        }
+
+        if (suggestions.length === 0 && maptilerKey) {
+          // Final fallback to Nominatim if MapTiler returns nothing.
+          for (const variant of variants) {
+            suggestions = mapSuggestions(
+              await fetchNominatimSuggestions(true, variant)
+            );
+            if (searchLookupId.current !== requestId) return;
+            if (suggestions.length > 0) break;
+
+            suggestions = mapSuggestions(
+              await fetchNominatimSuggestions(false, variant)
+            );
+            if (searchLookupId.current !== requestId) return;
+            if (suggestions.length > 0) break;
+          }
+        }
+
+        setSearchSuggestions(suggestions);
+      } catch (err: any) {
+        if (err?.name === "AbortError") return;
+        if (searchLookupId.current !== requestId) return;
+        setSearchError("Unable to fetch suggestions.");
+        setSearchSuggestions([]);
+      } finally {
+        if (searchLookupId.current === requestId) {
+          setSearchLoading(false);
+        }
+      }
+    }, 350);
+
+    return () => {
+      clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [isSearchFocused, maptilerKey, searchQuery, userCenter?.lat, userCenter?.lng]);
 
   useEffect(() => {
     let isActive = true;
@@ -141,6 +354,23 @@ export default function HomeScreen() {
     }
   };
 
+  const handleSelectSuggestion = (item: SearchSuggestion) => {
+    Keyboard.dismiss();
+    searchInputRef.current?.blur();
+    setSearchQuery(item.title);
+    setSearchSuggestions([]);
+    setSearchLoading(false);
+    setSearchError(null);
+
+    setSelectedLocation({ lng: item.lng, lat: item.lat });
+    setSelectedPlaceTitle(item.title);
+    setSelectedPlaceSubtitle(item.subtitle);
+    setSelectedPlaceError(null);
+    setSelectedPlaceLoading(false);
+
+    mapRef.current?.panToLocation(item.lng, item.lat, USER_FOCUS_ZOOM);
+  };
+
   return (
     <View style={{ flex: 1 }}>
       {/* Background map */}
@@ -152,6 +382,9 @@ export default function HomeScreen() {
           selectedLocation={selectedLocation}
           onMapPress={(location) => {
             setSelectedLocation(location);
+            setSearchSuggestions([]);
+            setSearchError(null);
+            setSearchLoading(false);
             lookupPlaceName(location);
           }}
         />
@@ -159,11 +392,54 @@ export default function HomeScreen() {
 
       {/* Your UI overlay */}
       <SafeAreaView edges={["top"]} style={styles.overlay} pointerEvents="box-none">
-        <View style={styles.card} pointerEvents="auto">
-          <Text style={styles.title}>Home Pranesh</Text>
-          <Text style={styles.sub}>Your content sits on top of the map.</Text>
+        <View style={styles.searchWrap} pointerEvents="auto">
+          <View style={styles.searchBar}>
+            <SearchIcon color="#26c485" />
+            <TextInput
+              ref={searchInputRef}
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              placeholder="Search places, hotels, landmarks"
+              placeholderTextColor="rgba(255,255,255,0.55)"
+              style={styles.searchInput}
+              returnKeyType="search"
+              onFocus={() => setIsSearchFocused(true)}
+              onBlur={() => setIsSearchFocused(false)}
+            />
+          </View>
+          {isSearchFocused &&
+          (searchLoading || searchError || searchQuery.trim().length >= 2) ? (
+            <View style={styles.suggestionsPanel}>
+              {searchLoading ? (
+                <Text style={styles.suggestionStatus}>Searching...</Text>
+              ) : searchError ? (
+                <Text style={styles.suggestionStatus}>{searchError}</Text>
+              ) : searchQuery.trim().length >= 2 && searchSuggestions.length === 0 ? (
+                <Text style={styles.suggestionStatus}>No results found.</Text>
+              ) : (
+                searchSuggestions.map((item, index) => (
+                  <Pressable
+                    key={item.id}
+                    onPress={() => handleSelectSuggestion(item)}
+                    style={({ pressed }) => [
+                      styles.suggestionItem,
+                      pressed ? { backgroundColor: "rgba(255,255,255,0.05)" } : null,
+                    ]}
+                  >
+                    <Text style={styles.suggestionTitle}>{item.title}</Text>
+                    {item.subtitle ? (
+                      <Text style={styles.suggestionSubtitle}>{item.subtitle}</Text>
+                    ) : null}
+                    {index < searchSuggestions.length - 1 ? (
+                      <View style={styles.suggestionDivider} />
+                    ) : null}
+                  </Pressable>
+                ))
+              )}
+            </View>
+          ) : null}
           {locationError ? (
-            <Text style={styles.sub}>{locationError}</Text>
+            <Text style={styles.searchHint}>{locationError}</Text>
           ) : null}
         </View>
       </SafeAreaView>
@@ -245,14 +521,65 @@ const styles = StyleSheet.create({
   overlay: {
     flex: 1,
   },
-  card: {
+  searchWrap: {
     margin: 16,
-    padding: 16,
-    borderRadius: 18,
-    backgroundColor: "rgba(20,20,20,0.70)",
   },
-  title: { color: "white", fontSize: 22, fontWeight: "700" },
-  sub: { color: "rgba(255,255,255,0.8)", marginTop: 6 },
+  searchBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: 14,
+    height: 50,
+    borderRadius: 16,
+    backgroundColor: "rgba(20,20,20,0.82)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  searchInput: {
+    flex: 1,
+    color: "white",
+    fontSize: 16,
+    paddingVertical: 0,
+  },
+  suggestionsPanel: {
+    marginTop: 10,
+    borderRadius: 14,
+    overflow: "hidden",
+    backgroundColor: "rgba(20,20,20,0.9)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  suggestionItem: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  suggestionTitle: {
+    color: "white",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  suggestionSubtitle: {
+    color: "rgba(255,255,255,0.65)",
+    fontSize: 12,
+    marginTop: 2,
+  },
+  suggestionDivider: {
+    height: 1,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    marginTop: 8,
+  },
+  suggestionStatus: {
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    color: "rgba(255,255,255,0.7)",
+    fontSize: 12,
+  },
+  searchHint: {
+    marginTop: 8,
+    marginLeft: 6,
+    color: "rgba(255,255,255,0.6)",
+    fontSize: 12,
+  },
   bottomCardContainer: {
     position: "absolute",
     left: 16,
@@ -330,6 +657,14 @@ type MapControlButtonProps = {
   icon: React.ReactNode;
 };
 
+type SearchSuggestion = {
+  id: string;
+  title: string;
+  subtitle: string | null;
+  lat: number;
+  lng: number;
+};
+
 function MapControlButton({
   accessibilityLabel,
   onPress,
@@ -386,6 +721,15 @@ function LocateIcon({ color }: { color: string }) {
         strokeWidth="2"
         strokeLinecap="round"
       />
+    </Svg>
+  );
+}
+
+function SearchIcon({ color }: { color: string }) {
+  return (
+    <Svg width={20} height={20} viewBox="0 0 24 24" fill="none">
+      <Circle cx="11" cy="11" r="6.5" stroke={color} strokeWidth="2" />
+      <Line x1="20" y1="20" x2="16.5" y2="16.5" stroke={color} strokeWidth="2" />
     </Svg>
   );
 }

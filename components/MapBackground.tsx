@@ -14,6 +14,7 @@ export type MapBackgroundHandle = {
   zoomIn: () => void;
   zoomOut: () => void;
   panToUser: (lng: number, lat: number, zoom?: number) => void;
+  panToLocation: (lng: number, lat: number, zoom?: number) => void;
 };
 
 type Props = {
@@ -52,6 +53,10 @@ const MapBackground = forwardRef<MapBackgroundHandle, Props>(function MapBackgro
       panToUser: (lng, lat, zoom) =>
         inject(
           `window.panToUserLocation && window.panToUserLocation(${lng}, ${lat}, ${zoom ?? "null"})`
+        ),
+      panToLocation: (lng, lat, zoom) =>
+        inject(
+          `window.panToLocation && window.panToLocation(${lng}, ${lat}, ${zoom ?? "null"})`
         ),
     }),
     [inject]
@@ -139,13 +144,15 @@ const MapBackground = forwardRef<MapBackgroundHandle, Props>(function MapBackgro
 
     window.mapZoomIn = () => map.zoomIn({ duration: 250 });
     window.mapZoomOut = () => map.zoomOut({ duration: 250 });
-    window.panToUserLocation = (lng, lat, zoom) => {
+    const panToLocation = (lng, lat, zoom) => {
       if (typeof zoom === "number") {
         map.easeTo({ center: [lng, lat], zoom, duration: 600 });
         return;
       }
       map.easeTo({ center: [lng, lat], duration: 600 });
     };
+    window.panToLocation = panToLocation;
+    window.panToUserLocation = panToLocation;
     map.on("click", (event) => {
       const { lng, lat } = event.lngLat;
       window.setSelectedLocation(lng, lat);
