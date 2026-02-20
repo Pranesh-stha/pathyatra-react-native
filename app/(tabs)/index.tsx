@@ -1,14 +1,18 @@
 import React, { useEffect, useRef, useState } from "react";
-import { View, Text, StyleSheet, Pressable, TextInput, Keyboard } from "react-native";
+import { View, Text, StyleSheet, Pressable, TextInput, Keyboard, Platform } from "react-native";
 import Svg, { Circle, Line, Path } from "react-native-svg";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Location from "expo-location";
-import MapBackground, { MapBackgroundHandle } from "../../components/MapBackground";
+import MapBackground, {
+  MapBackgroundHandle,
+  MapPolylineSegment,
+} from "../../components/MapBackground";
 
 export default function HomeScreen() {
   const USER_FOCUS_ZOOM = 15;
   const NEPAL_VIEWBOX_NOMINATIM = "80.058,30.447,88.201,26.347";
   const NEPAL_BBOX_MAPTILER = "80.058,26.347,88.201,30.447";
+  const BACKEND_BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
   const mapRef = useRef<MapBackgroundHandle>(null);
   const maptilerKey = process.env.EXPO_PUBLIC_MAPTILER_KEY;
   const searchInputRef = useRef<TextInput>(null);
@@ -39,6 +43,22 @@ export default function HomeScreen() {
   const [selectedPlaceError, setSelectedPlaceError] = useState<string | null>(null);
   const placeLookupId = useRef(0);
   const [locationError, setLocationError] = useState<string | null>(null);
+  const [tripPlanLoading, setTripPlanLoading] = useState(false);
+  const [tripPlanError, setTripPlanError] = useState<string | null>(null);
+  const [tripPlan, setTripPlan] = useState<TripItinerary | null>(null);
+  const [tripSegments, setTripSegments] = useState<MapPolylineSegment[]>([]);
+  const proximityLat = userCenter?.lat;
+  const proximityLng = userCenter?.lng;
+
+  const resolveBackendBaseUrl = () => {
+    if (!BACKEND_BASE_URL) return null;
+    const baseUrl = BACKEND_BASE_URL.replace(/\/+$/, "");
+    if (Platform.OS !== "android") return baseUrl;
+    // Android emulator cannot reach host machine via localhost.
+    return baseUrl
+      .replace("://localhost", "://10.0.2.2")
+      .replace("://127.0.0.1", "://10.0.2.2");
+  };
 
   useEffect(() => {
     const query = searchQuery.trim();
@@ -76,8 +96,8 @@ export default function HomeScreen() {
             params.set("country", "np");
             params.set("bbox", NEPAL_BBOX_MAPTILER);
           }
-          if (userCenter) {
-            params.set("proximity", `${userCenter.lng},${userCenter.lat}`);
+          if (Number.isFinite(proximityLat) && Number.isFinite(proximityLng)) {
+            params.set("proximity", `${proximityLng},${proximityLat}`);
           }
 
           const url = `https://api.maptiler.com/geocoding/${encodeURIComponent(
@@ -240,7 +260,7 @@ export default function HomeScreen() {
       clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [isSearchFocused, maptilerKey, searchQuery, userCenter?.lat, userCenter?.lng]);
+  }, [isSearchFocused, maptilerKey, proximityLat, proximityLng, searchQuery]);
 
   useEffect(() => {
     let isActive = true;
@@ -282,7 +302,7 @@ export default function HomeScreen() {
             });
           }
         );
-      } catch (err) {
+      } catch {
         if (isActive) setLocationError("Unable to fetch location.");
       }
     };
@@ -344,13 +364,122 @@ export default function HomeScreen() {
 
       setSelectedPlaceTitle(title);
       setSelectedPlaceSubtitle(subtitle);
-    } catch (err) {
+    } catch {
       if (placeLookupId.current !== requestId) return;
       setSelectedPlaceError("Unable to fetch place name.");
     } finally {
       if (placeLookupId.current === requestId) {
         setSelectedPlaceLoading(false);
       }
+    }
+  };
+
+  const clearTripPlan = () => {
+    setTripPlanLoading(false);
+    setTripPlanError(null);
+    setTripPlan(null);
+    setTripSegments([]);
+  };
+
+  const requestTripPlan = async () => {
+    if (!selectedLocation) {
+      setTripPlanError("Select a destination first.");
+      return;
+    }
+    if (!userCenter) {
+      setTripPlanError("Current location unavailable.");
+      return;
+    }
+    if (!BACKEND_BASE_URL) {
+      setTripPlanError("Set EXPO_PUBLIC_BACKEND_URL in .env.");
+      return;
+    }
+
+    const baseUrl = resolveBackendBaseUrl();
+    if (!baseUrl) {
+      setTripPlanError("Backend URL is missing.");
+      return;
+    }
+    const params = new URLSearchParams({
+      fromLat: String(userCenter.lat),
+      fromLon: String(userCenter.lng),
+      toLat: String(selectedLocation.lat),
+      toLon: String(selectedLocation.lng),
+    });
+
+    setTripPlanLoading(true);
+    setTripPlanError(null);
+    setTripPlan(null);
+    setTripSegments([]);
+
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const controller = new AbortController();
+      timeoutId = setTimeout(() => controller.abort(), 45000);
+      const response = await fetch(`${baseUrl}/v1/trips/plan?${params.toString()}`, {
+        headers: {
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+      });
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(payload?.error?.message || `Trip planning failed (${response.status}).`);
+      }
+      if (!payload || typeof payload !== "object") {
+        throw new Error("Trip planner returned invalid response.");
+      }
+      if (payload.status === "no_route") {
+        setTripPlanError(payload.message || "No direct route found.");
+        return;
+      }
+
+      const itinerary = payload.itinerary as TripItinerary | undefined;
+      if (!itinerary || !Array.isArray(itinerary.segments)) {
+        throw new Error("Trip planner returned incomplete itinerary.");
+      }
+
+      const mapSegments: MapPolylineSegment[] = itinerary.segments
+        .map((segment, index) => {
+          const coordinates = Array.isArray(segment.geometry?.coordinates)
+            ? segment.geometry.coordinates
+                .map((pair) => ({
+                  lng: Number(pair[0]),
+                  lat: Number(pair[1]),
+                }))
+                .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng))
+            : [];
+
+          if (coordinates.length < 2) return null;
+          return {
+            id: `${segment.id}_${index}`,
+            color: segment.color,
+            width: segment.mode === "bus" ? 6 : 5,
+            coordinates,
+          } as MapPolylineSegment;
+        })
+        .filter(Boolean) as MapPolylineSegment[];
+
+      setTripPlan(itinerary);
+      setTripSegments(mapSegments);
+    } catch (error: any) {
+      const message = String(error?.message ?? "");
+      if (message.toLowerCase().includes("aborted")) {
+        setTripPlanError("Trip planning timed out. Please try again.");
+      } else if (message.toLowerCase().includes("network request failed")) {
+        setTripPlanError(
+          `Cannot reach backend at ${baseUrl}. If using phone, set EXPO_PUBLIC_BACKEND_URL to http://<your-pc-lan-ip>:4000. Android emulator uses http://10.0.2.2:4000.`
+        );
+      } else {
+        setTripPlanError(message || "Unable to plan this trip.");
+      }
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+      setTripPlanLoading(false);
     }
   };
 
@@ -367,6 +496,7 @@ export default function HomeScreen() {
     setSelectedPlaceSubtitle(item.subtitle);
     setSelectedPlaceError(null);
     setSelectedPlaceLoading(false);
+    clearTripPlan();
 
     mapRef.current?.panToLocation(item.lng, item.lat, USER_FOCUS_ZOOM);
   };
@@ -380,11 +510,13 @@ export default function HomeScreen() {
           initialCenter={initialCenter ?? undefined}
           userLocation={userCenter ? { lng: userCenter.lng, lat: userCenter.lat } : undefined}
           selectedLocation={selectedLocation}
+          routeSegments={tripSegments}
           onMapPress={(location) => {
             setSelectedLocation(location);
             setSearchSuggestions([]);
             setSearchError(null);
             setSearchLoading(false);
+            clearTripPlan();
             lookupPlaceName(location);
           }}
         />
@@ -489,16 +621,17 @@ export default function HomeScreen() {
                   setSelectedPlaceSubtitle(null);
                   setSelectedPlaceError(null);
                   setSelectedPlaceLoading(false);
+                  clearTripPlan();
                 }}
                 accessibilityRole="button"
                 accessibilityLabel="Close selected place card"
                 style={styles.closeButton}
               >
-                <Text style={styles.closeButtonText}>×</Text>
+                <Text style={styles.closeButtonText}>x</Text>
               </Pressable>
             </View>
             {selectedPlaceLoading ? (
-              <Text style={styles.bottomCardText}>Looking up place…</Text>
+              <Text style={styles.bottomCardText}>Looking up place...</Text>
             ) : selectedPlaceError ? (
               <Text style={styles.bottomCardText}>{selectedPlaceError}</Text>
             ) : selectedPlaceSubtitle ? (
@@ -510,6 +643,48 @@ export default function HomeScreen() {
             <Text style={styles.bottomCardText}>
               Longitude: {selectedLocation.lng.toFixed(6)}
             </Text>
+
+            <View style={styles.bottomCardActions}>
+              <Pressable
+                onPress={requestTripPlan}
+                disabled={tripPlanLoading || !userCenter}
+                style={({ pressed }) => [
+                  styles.directionButton,
+                  tripPlanLoading || !userCenter ? styles.directionButtonDisabled : null,
+                  pressed && !(tripPlanLoading || !userCenter)
+                    ? { transform: [{ scale: 0.98 }] }
+                    : null,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Get bus directions"
+              >
+                <Text style={styles.directionButtonText}>
+                  {tripPlanLoading ? "Planning..." : "Directions"}
+                </Text>
+              </Pressable>
+            </View>
+
+            {tripPlanError ? (
+              <Text style={styles.tripErrorText}>{tripPlanError}</Text>
+            ) : null}
+
+            {tripPlan ? (
+              <View style={styles.tripSummaryCard}>
+                <Text style={styles.tripSummaryTitle}>
+                  {tripPlan.route?.name ?? "Bus Route"}
+                </Text>
+                <Text style={styles.tripSummaryText}>
+                  Board: {tripPlan.boardingPlatform?.name ?? tripPlan.boardingStation.name}
+                </Text>
+                <Text style={styles.tripSummaryText}>
+                  Get off: {tripPlan.alightingPlatform?.name ?? tripPlan.alightingStation.name}
+                </Text>
+                <Text style={styles.tripSummaryText}>
+                  ETA {formatDuration(tripPlan.totals.totalDurationS)} | Distance{" "}
+                  {formatDistance(tripPlan.totals.totalDistanceM)}
+                </Text>
+              </View>
+            ) : null}
           </View>
         </SafeAreaView>
       ) : null}
@@ -606,6 +781,48 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.85)",
     marginTop: 2,
   },
+  bottomCardActions: {
+    marginTop: 10,
+  },
+  directionButton: {
+    height: 42,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#1FAE66",
+  },
+  directionButtonDisabled: {
+    opacity: 0.55,
+  },
+  directionButtonText: {
+    color: "white",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  tripErrorText: {
+    marginTop: 8,
+    color: "#ff8a80",
+    fontSize: 12,
+  },
+  tripSummaryCard: {
+    marginTop: 10,
+    borderRadius: 12,
+    padding: 10,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  tripSummaryTitle: {
+    color: "white",
+    fontSize: 14,
+    fontWeight: "700",
+    marginBottom: 4,
+  },
+  tripSummaryText: {
+    color: "rgba(255,255,255,0.82)",
+    fontSize: 12,
+    marginTop: 2,
+  },
   closeButton: {
     width: 28,
     height: 28,
@@ -664,6 +881,65 @@ type SearchSuggestion = {
   lat: number;
   lng: number;
 };
+
+type LineStringGeometry = {
+  type: "LineString";
+  coordinates: number[][];
+};
+
+type TripSegment = {
+  id: string;
+  mode: "walk" | "bus" | string;
+  color: string;
+  distanceM: number;
+  durationS: number;
+  geometry: LineStringGeometry;
+};
+
+type TripStop = {
+  id: string;
+  name: string;
+  lat: number;
+  lon: number;
+};
+
+type TripPlatform = {
+  id: string;
+  name: string;
+  side: string;
+  lat: number;
+  lon: number;
+};
+
+type TripItinerary = {
+  route: {
+    id: string;
+    name: string;
+  };
+  boardingStation: TripStop;
+  boardingPlatform: TripPlatform | null;
+  alightingStation: TripStop;
+  alightingPlatform: TripPlatform | null;
+  segments: TripSegment[];
+  totals: {
+    totalDistanceM: number;
+    totalDurationS: number;
+  };
+};
+
+function formatDuration(seconds: number) {
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remaining = minutes % 60;
+  if (remaining === 0) return `${hours} hr`;
+  return `${hours} hr ${remaining} min`;
+}
+
+function formatDistance(distanceM: number) {
+  if (distanceM < 1000) return `${Math.round(distanceM)} m`;
+  return `${(distanceM / 1000).toFixed(1)} km`;
+}
 
 function MapControlButton({
   accessibilityLabel,

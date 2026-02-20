@@ -17,11 +17,19 @@ export type MapBackgroundHandle = {
   panToLocation: (lng: number, lat: number, zoom?: number) => void;
 };
 
+export type MapPolylineSegment = {
+  id: string;
+  color: string;
+  width?: number;
+  coordinates: { lng: number; lat: number }[];
+};
+
 type Props = {
   // Optional: start somewhere (Kathmandu default-ish)
   initialCenter?: { lng: number; lat: number; zoom?: number };
   userLocation?: { lng: number; lat: number };
   selectedLocation?: { lng: number; lat: number } | null;
+  routeSegments?: MapPolylineSegment[];
   onMapPress?: (location: { lng: number; lat: number }) => void;
   mapId?: string; // e.g. "streets-v2", "outdoor-v2", etc.
 };
@@ -31,6 +39,7 @@ const MapBackground = forwardRef<MapBackgroundHandle, Props>(function MapBackgro
     initialCenter = { lng: 85.324, lat: 27.7172, zoom: 12 },
     userLocation,
     selectedLocation = null,
+    routeSegments = [],
     onMapPress,
     mapId = "openstreetmap",
   },
@@ -101,6 +110,8 @@ const MapBackground = forwardRef<MapBackgroundHandle, Props>(function MapBackgro
 
     let userMarker = null;
     let selectedMarker = null;
+    let routeLayerIds = [];
+    let routeSourceIds = [];
     const getUserMarker = () => {
       if (userMarker) return userMarker;
       const userDot = document.createElement("div");
@@ -140,6 +151,90 @@ const MapBackground = forwardRef<MapBackgroundHandle, Props>(function MapBackgro
         selectedMarker.remove();
         selectedMarker = null;
       }
+    };
+
+    const clearRoutes = () => {
+      routeLayerIds.forEach((id) => {
+        if (map.getLayer(id)) {
+          map.removeLayer(id);
+        }
+      });
+      routeSourceIds.forEach((id) => {
+        if (map.getSource(id)) {
+          map.removeSource(id);
+        }
+      });
+      routeLayerIds = [];
+      routeSourceIds = [];
+    };
+
+    window.setRouteSegments = (rawSegments) => {
+      let segments = [];
+      try {
+        segments = typeof rawSegments === "string" ? JSON.parse(rawSegments) : rawSegments;
+      } catch (e) {
+        segments = [];
+      }
+
+      if (!Array.isArray(segments)) {
+        clearRoutes();
+        return;
+      }
+
+      if (!map.isStyleLoaded()) {
+        map.once("load", () => window.setRouteSegments(rawSegments));
+        return;
+      }
+
+      clearRoutes();
+      segments.forEach((segment, index) => {
+        if (!segment || !Array.isArray(segment.coordinates)) return;
+        const coordinates = segment.coordinates
+          .map((point) => [Number(point.lng), Number(point.lat)])
+          .filter(
+            (point) =>
+              Array.isArray(point) &&
+              point.length === 2 &&
+              Number.isFinite(point[0]) &&
+              Number.isFinite(point[1])
+          );
+        if (coordinates.length < 2) return;
+
+        const sourceId = "route-source-" + index;
+        const layerId = "route-layer-" + index;
+        map.addSource(sourceId, {
+          type: "geojson",
+          data: {
+            type: "Feature",
+            properties: {},
+            geometry: {
+              type: "LineString",
+              coordinates,
+            },
+          },
+        });
+        map.addLayer({
+          id: layerId,
+          type: "line",
+          source: sourceId,
+          layout: {
+            "line-cap": "round",
+            "line-join": "round",
+          },
+          paint: {
+            "line-color": segment.color || "#2D7FF9",
+            "line-width": Number(segment.width) || 5,
+            "line-opacity": 0.94,
+          },
+        });
+
+        routeSourceIds.push(sourceId);
+        routeLayerIds.push(layerId);
+      });
+    };
+
+    window.clearRouteSegments = () => {
+      clearRoutes();
     };
 
     window.mapZoomIn = () => map.zoomIn({ duration: 250 });
@@ -184,24 +279,37 @@ const MapBackground = forwardRef<MapBackgroundHandle, Props>(function MapBackgro
   }, [html]);
 
   useEffect(() => {
-    if (!key || !isMapReady || !userLocation) return;
+    const userLat = userLocation?.lat;
+    const userLng = userLocation?.lng;
+    if (!key || !isMapReady) return;
+    if (!Number.isFinite(userLat) || !Number.isFinite(userLng)) return;
     webViewRef.current?.injectJavaScript(
-      `window.setUserLocation && window.setUserLocation(${userLocation.lng}, ${userLocation.lat}); true;`
+      `window.setUserLocation && window.setUserLocation(${userLng}, ${userLat}); true;`
     );
   }, [isMapReady, key, userLocation?.lat, userLocation?.lng]);
 
   useEffect(() => {
+    const selectedLat = selectedLocation?.lat;
+    const selectedLng = selectedLocation?.lng;
     if (!key || !isMapReady) return;
-    if (!selectedLocation) {
+    if (!Number.isFinite(selectedLat) || !Number.isFinite(selectedLng)) {
       webViewRef.current?.injectJavaScript(
         "window.clearSelectedLocation && window.clearSelectedLocation(); true;"
       );
       return;
     }
     webViewRef.current?.injectJavaScript(
-      `window.setSelectedLocation && window.setSelectedLocation(${selectedLocation.lng}, ${selectedLocation.lat}); true;`
+      `window.setSelectedLocation && window.setSelectedLocation(${selectedLng}, ${selectedLat}); true;`
     );
   }, [isMapReady, key, selectedLocation?.lat, selectedLocation?.lng]);
+
+  useEffect(() => {
+    if (!key || !isMapReady) return;
+    const payload = JSON.stringify(routeSegments ?? []);
+    webViewRef.current?.injectJavaScript(
+      `window.setRouteSegments && window.setRouteSegments(${JSON.stringify(payload)}); true;`
+    );
+  }, [isMapReady, key, routeSegments]);
 
   if (!key) {
     // Render a blank map area if key isn't set yet (avoids crash)
