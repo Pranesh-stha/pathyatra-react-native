@@ -449,6 +449,40 @@ function buildCandidateOptions({
   return candidateOptions;
 }
 
+function findCandidatesByNearestStopExpansion({
+  originCandidates,
+  destinationCandidates,
+  variants,
+  variantStationIndex,
+  edgeIndex,
+  variantStopSequenceToPoint,
+}) {
+  const maxDepth = Math.max(originCandidates.length, destinationCandidates.length);
+
+  for (let depth = 1; depth <= maxDepth; depth += 1) {
+    const originPool = originCandidates.slice(0, Math.min(depth, originCandidates.length));
+    const destinationPool = destinationCandidates.slice(
+      0,
+      Math.min(depth, destinationCandidates.length)
+    );
+    if (originPool.length === 0 || destinationPool.length === 0) continue;
+
+    const candidateOptions = buildCandidateOptions({
+      originCandidates: originPool,
+      destinationCandidates: destinationPool,
+      variants,
+      variantStationIndex,
+      edgeIndex,
+      variantStopSequenceToPoint,
+    });
+    if (candidateOptions.length > 0) {
+      return candidateOptions;
+    }
+  }
+
+  return [];
+}
+
 function buildEvaluationShortlist(candidateOptions) {
   if (candidateOptions.length <= MAX_EXACT_WALK_EVALUATIONS) {
     return candidateOptions;
@@ -646,7 +680,7 @@ export async function planSingleBusTrip({ fromLat, fromLon, toLat, toLon }) {
       .set(Number(row.stop_sequence), point);
   }
 
-  let candidateOptions = buildCandidateOptions({
+  let candidateOptions = findCandidatesByNearestStopExpansion({
     originCandidates,
     destinationCandidates,
     variants,
@@ -671,7 +705,7 @@ export async function planSingleBusTrip({ fromLat, fromLon, toLat, toLon }) {
       }),
     ]);
 
-    candidateOptions = buildCandidateOptions({
+    candidateOptions = findCandidatesByNearestStopExpansion({
       originCandidates: expandedOriginCandidates,
       destinationCandidates: expandedDestinationCandidates,
       variants,
