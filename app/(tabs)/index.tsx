@@ -13,6 +13,7 @@ import {
 import Svg, { Circle, Line, Path } from "react-native-svg";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Location from "expo-location";
+import * as Haptics from "expo-haptics";
 import MapBackground, {
   MapBackgroundHandle,
   MapPolylineSegment,
@@ -777,6 +778,7 @@ export default function HomeScreen() {
     setTripSegments([]);
   };
 
+
   const requestTripPlan = async () => {
     if (!selectedLocation) {
       setTripPlanError(t.selectDestination);
@@ -895,7 +897,6 @@ export default function HomeScreen() {
     setIsSheetCollapsed(false);
     animateSheetTo(0);
     clearTripPlan();
-
     mapRef.current?.panToLocation(item.lng, item.lat, USER_FOCUS_ZOOM);
   };
 
@@ -932,6 +933,7 @@ export default function HomeScreen() {
   };
 
   const handleDirectionsPress = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setShowFromSelector(true);
     animateSheetTo(0);
     setIsSheetCollapsed(false);
@@ -952,6 +954,7 @@ export default function HomeScreen() {
           mapId={mapId}
           userLocation={userCenter ? { lng: userCenter.lng, lat: userCenter.lat } : undefined}
           selectedLocation={selectedLocation}
+          fromLocation={customFromLocation}
           routeSegments={tripSegments}
           onMapPress={(location) => {
             setSelectedLocation(location);
@@ -1226,6 +1229,7 @@ export default function HomeScreen() {
                 </Text>
               </Pressable>
             </View>
+
 
             {tripPlanError ? (
               <Text style={styles.tripErrorText}>{tripPlanError}</Text>

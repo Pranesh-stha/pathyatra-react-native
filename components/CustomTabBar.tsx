@@ -1,7 +1,8 @@
 import { Ionicons } from "@expo/vector-icons";
 import type { BottomTabBarProps } from "@react-navigation/bottom-tabs";
 import React from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import * as Haptics from "expo-haptics";
 import {
   APP_TAB_BAR_BORDER_TOP_WIDTH,
   APP_TAB_BAR_ITEM_HEIGHT,
@@ -60,6 +61,9 @@ export default function CustomTabBar({
               options.tabBarLabel?.toString() ?? options.title ?? route.name;
 
             const onPress = () => {
+              if (Platform.OS === "ios") {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              }
               const event = navigation.emit({
                 type: "tabPress",
                 target: route.key,

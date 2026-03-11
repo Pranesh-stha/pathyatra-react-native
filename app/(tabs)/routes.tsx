@@ -4,19 +4,16 @@ import { useLanguage } from "@/context/LanguageContext";
 import { useMapStyle } from "@/context/MapStyleContext";
 import {
   ActivityIndicator,
-  Clipboard,
-  Keyboard,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
-  useWindowDimensions,
   View,
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
-import RouteMap, { RouteMapCoordinate, RouteMapStop } from "@/components/RouteMap";
+import RouteMap, { RouteMapStop } from "@/components/RouteMap";
 import { getAppTabBarHeight } from "@/constants/tabBar";
 
 type RouteSummary = {
@@ -60,14 +57,6 @@ type RouteDetail = {
   };
 };
 
-type SearchSuggestion = {
-  id: string;
-  title: string;
-  subtitle: string | null;
-  lat: number;
-  lng: number;
-};
-
 export default function RoutesScreen() {
   const { isDark } = useTheme();
   const { t } = useLanguage();
@@ -85,31 +74,15 @@ export default function RoutesScreen() {
     inputBorder: isDark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.10)",
     inputText: isDark ? "white" : "#1a1a1a",
     inputPlaceholder: isDark ? "rgba(255,255,255,0.48)" : "rgba(0,0,0,0.4)",
-    suggestionBg: isDark ? "rgba(20,20,20,0.92)" : "rgba(200,212,222,0.97)",
-    suggestionBorder: isDark ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.10)",
-    suggestionTitle: isDark ? "white" : "#1a1a1a",
-    suggestionSubtitle: isDark ? "rgba(255,255,255,0.65)" : "#4a5568",
-    suggestionDivider: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.09)",
-    suggestionStatus: isDark ? "rgba(255,255,255,0.72)" : "rgba(0,0,0,0.48)",
     stateText: isDark ? "rgba(255,255,255,0.75)" : "rgba(0,0,0,0.52)",
     backBtn: isDark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.10)",
     backBtnText: isDark ? "white" : "#1a1a1a",
     chipInactive: isDark ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.10)",
     chipTextInactive: isDark ? "rgba(255,255,255,0.85)" : "rgba(0,0,0,0.62)",
-    coordCardBg: isDark ? "rgba(255,255,255,0.06)" : "#d5e0ea",
-    coordCardBorder: isDark ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.10)",
-    coordText: isDark ? "rgba(255,255,255,0.82)" : "rgba(0,0,0,0.65)",
-    stopRowBg: isDark ? "rgba(255,255,255,0.04)" : "#ccd8e2",
-    stopRowBorder: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.09)",
     mapBorder: isDark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)",
     hintText: isDark ? "rgba(255,255,255,0.65)" : "rgba(0,0,0,0.48)",
   };
-  const NEPAL_VIEWBOX_NOMINATIM = "80.058,30.447,88.201,26.347";
-  const NEPAL_BBOX_MAPTILER = "80.058,26.347,88.201,30.447";
-  const MAP_FOCUS_ZOOM = 15;
-  const { height: screenHeight } = useWindowDimensions();
   const backendBaseUrlRaw = process.env.EXPO_PUBLIC_BACKEND_URL;
-  const maptilerKey = process.env.EXPO_PUBLIC_MAPTILER_KEY;
   const [routeList, setRouteList] = useState<RouteSummary[]>([]);
   const [routeListLoading, setRouteListLoading] = useState(false);
   const [routeListError, setRouteListError] = useState<string | null>(null);
@@ -120,18 +93,6 @@ export default function RoutesScreen() {
   const [routeDetailLoading, setRouteDetailLoading] = useState(false);
   const [routeDetailError, setRouteDetailError] = useState<string | null>(null);
   const [selectedVariantId, setSelectedVariantId] = useState<string | null>(null);
-  const [pressedLocation, setPressedLocation] = useState<RouteMapCoordinate | null>(null);
-  const [detailSearchQuery, setDetailSearchQuery] = useState("");
-  const [detailSearchFocused, setDetailSearchFocused] = useState(false);
-  const [detailSearchSuggestions, setDetailSearchSuggestions] = useState<SearchSuggestion[]>([]);
-  const [detailSearchLoading, setDetailSearchLoading] = useState(false);
-  const [detailSearchError, setDetailSearchError] = useState<string | null>(null);
-  const [focusLocation, setFocusLocation] = useState<RouteMapCoordinate | null>(null);
-  const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
-  const routeMapHeight = Math.max(380, Math.min(620, Math.round(screenHeight * 0.52)));
-  const searchLookupId = React.useRef(0);
-  const searchAbortRef = React.useRef<AbortController | null>(null);
-  const copyFeedbackTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const resolveBackendBaseUrl = () => {
     if (!backendBaseUrlRaw) return null;
@@ -143,23 +104,6 @@ export default function RoutesScreen() {
   };
 
   const backendBaseUrl = resolveBackendBaseUrl();
-
-  const resetDetailSearch = () => {
-    setDetailSearchQuery("");
-    setDetailSearchFocused(false);
-    setDetailSearchSuggestions([]);
-    setDetailSearchLoading(false);
-    setDetailSearchError(null);
-    searchAbortRef.current?.abort();
-  };
-
-  const clearCopyFeedback = () => {
-    if (copyFeedbackTimerRef.current) {
-      clearTimeout(copyFeedbackTimerRef.current);
-      copyFeedbackTimerRef.current = null;
-    }
-    setCopyFeedback(null);
-  };
 
   const loadRoutes = async () => {
     if (!backendBaseUrl) {
@@ -201,9 +145,6 @@ export default function RoutesScreen() {
     if (!keepCurrent) {
       setRouteDetail(null);
     }
-    setPressedLocation(null);
-    setFocusLocation(null);
-    clearCopyFeedback();
     try {
       const params = new URLSearchParams();
       if (shapeVariantId) {
@@ -256,190 +197,6 @@ export default function RoutesScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    return () => {
-      searchAbortRef.current?.abort();
-      clearCopyFeedback();
-    };
-  }, []);
-
-  useEffect(() => {
-    const query = detailSearchQuery.trim();
-    if (!detailSearchFocused || query.length < 2) {
-      setDetailSearchSuggestions([]);
-      setDetailSearchLoading(false);
-      setDetailSearchError(null);
-      searchAbortRef.current?.abort();
-      return;
-    }
-
-    const requestId = (searchLookupId.current += 1);
-    setDetailSearchLoading(true);
-    setDetailSearchError(null);
-
-    const controller = new AbortController();
-    searchAbortRef.current?.abort();
-    searchAbortRef.current = controller;
-
-    const timeoutId = setTimeout(async () => {
-      try {
-        const mapSuggestions = (items: SearchSuggestion[]) => items.filter(Boolean).slice(0, 5);
-
-        const fetchMapTilerSuggestions = async (preferNepal: boolean, q: string) => {
-          if (!maptilerKey) return [];
-          const params = new URLSearchParams({
-            key: maptilerKey,
-            limit: "5",
-            language: "en",
-            types:
-              "poi,address,place,locality,neighbourhood,road,postal_code,region,subregion,county,municipality,country",
-          });
-          if (preferNepal) {
-            params.set("country", "np");
-            params.set("bbox", NEPAL_BBOX_MAPTILER);
-          }
-
-          const url = `https://api.maptiler.com/geocoding/${encodeURIComponent(
-            q
-          )}.json?${params.toString()}`;
-          const response = await fetch(url, {
-            signal: controller.signal,
-            headers: { Accept: "application/json" },
-          });
-          if (!response.ok) throw new Error(`Search failed (${response.status})`);
-
-          const data = await response.json();
-          const features = Array.isArray(data?.features) ? data.features : [];
-          return features
-            .map((feature: any) => {
-              const center = Array.isArray(feature?.center)
-                ? feature.center
-                : Array.isArray(feature?.geometry?.coordinates)
-                  ? feature.geometry.coordinates
-                  : null;
-              if (!center || center.length < 2) return null;
-              const [lng, lat] = center;
-              if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-              const title = feature?.text || feature?.place_name?.split(",")[0] || "Result";
-              const subtitle = feature?.place_name || null;
-              return {
-                id: String(feature?.id ?? `${lat},${lng}`),
-                title,
-                subtitle,
-                lat,
-                lng,
-              } as SearchSuggestion;
-            })
-            .filter(Boolean)
-            .slice(0, 5);
-        };
-
-        const fetchNominatimSuggestions = async (preferNepal: boolean, q: string) => {
-          const params = new URLSearchParams({
-            format: "jsonv2",
-            addressdetails: "1",
-            limit: "5",
-            q,
-          });
-          if (preferNepal) {
-            params.set("countrycodes", "np");
-            params.set("viewbox", NEPAL_VIEWBOX_NOMINATIM);
-            params.set("bounded", "0");
-          }
-
-          const url = `https://nominatim.openstreetmap.org/search?${params.toString()}`;
-          const response = await fetch(url, {
-            signal: controller.signal,
-            headers: {
-              Accept: "application/json",
-              "Accept-Language": "en",
-              "User-Agent": "RouteApp/1.0",
-            },
-          });
-          if (!response.ok) throw new Error(`Search failed (${response.status})`);
-
-          const data = await response.json();
-          return Array.isArray(data)
-            ? data
-                .map((item: any) => {
-                  const lat = Number(item?.lat);
-                  const lng = Number(item?.lon);
-                  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-                  const rawName = item?.name || "";
-                  const displayName = item?.display_name || "";
-                  const title = rawName || displayName.split(",")[0] || "Result";
-                  const subtitle = displayName && displayName !== title ? displayName : null;
-                  return {
-                    id: String(item?.place_id ?? `${lat},${lng}`),
-                    title,
-                    subtitle,
-                    lat,
-                    lng,
-                  } as SearchSuggestion;
-                })
-                .filter(Boolean)
-                .slice(0, 5)
-            : [];
-        };
-
-        const variants = Array.from(new Set([query, query.replace(/\bhos(p)?$/i, "hospital")]));
-        let suggestions: SearchSuggestion[] = [];
-
-        for (const variant of variants) {
-          suggestions = mapSuggestions(
-            maptilerKey
-              ? await fetchMapTilerSuggestions(true, variant)
-              : await fetchNominatimSuggestions(true, variant)
-          );
-          if (searchLookupId.current !== requestId) return;
-          if (suggestions.length > 0) break;
-
-          suggestions = mapSuggestions(
-            maptilerKey
-              ? await fetchMapTilerSuggestions(false, variant)
-              : await fetchNominatimSuggestions(false, variant)
-          );
-          if (searchLookupId.current !== requestId) return;
-          if (suggestions.length > 0) break;
-        }
-
-        if (suggestions.length === 0 && maptilerKey) {
-          for (const variant of variants) {
-            suggestions = mapSuggestions(await fetchNominatimSuggestions(true, variant));
-            if (searchLookupId.current !== requestId) return;
-            if (suggestions.length > 0) break;
-
-            suggestions = mapSuggestions(await fetchNominatimSuggestions(false, variant));
-            if (searchLookupId.current !== requestId) return;
-            if (suggestions.length > 0) break;
-          }
-        }
-
-        setDetailSearchSuggestions(suggestions);
-      } catch (error: any) {
-        if (error?.name === "AbortError") return;
-        if (searchLookupId.current !== requestId) return;
-        setDetailSearchError("Unable to fetch suggestions.");
-        setDetailSearchSuggestions([]);
-      } finally {
-        if (searchLookupId.current === requestId) {
-          setDetailSearchLoading(false);
-        }
-      }
-    }, 350);
-
-    return () => {
-      clearTimeout(timeoutId);
-      controller.abort();
-    };
-  }, [
-    detailSearchFocused,
-    detailSearchQuery,
-    maptilerKey,
-    NEPAL_BBOX_MAPTILER,
-    NEPAL_VIEWBOX_NOMINATIM,
-  ]);
-
   const filteredRoutes = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     if (!query) return routeList;
@@ -484,30 +241,6 @@ export default function RoutesScreen() {
   );
   const hasSnappedRouteShape = routeCoordinates.length >= 2;
 
-  const handleDetailSearchSelect = (item: SearchSuggestion) => {
-    Keyboard.dismiss();
-    setDetailSearchQuery(item.title);
-    setDetailSearchSuggestions([]);
-    setDetailSearchLoading(false);
-    setDetailSearchError(null);
-    const selected = { lng: item.lng, lat: item.lat };
-    setFocusLocation(selected);
-    setPressedLocation(selected);
-    clearCopyFeedback();
-  };
-
-  const handleCopyPressedLocation = () => {
-    if (!pressedLocation) return;
-    const value = `lat: ${pressedLocation.lat.toFixed(8)}\nlon: ${pressedLocation.lng.toFixed(8)}`;
-    Clipboard.setString(value);
-    clearCopyFeedback();
-    setCopyFeedback(t.copied);
-    copyFeedbackTimerRef.current = setTimeout(() => {
-      setCopyFeedback(null);
-      copyFeedbackTimerRef.current = null;
-    }, 1500);
-  };
-
   if (selectedRouteId && (routeDetail || routeDetailLoading || routeDetailError)) {
     return (
       <SafeAreaView edges={["top"]} style={[styles.container, { backgroundColor: r.bg }]}>
@@ -519,10 +252,6 @@ export default function RoutesScreen() {
               setRouteDetail(null);
               setRouteDetailError(null);
               setSelectedVariantId(null);
-              setPressedLocation(null);
-              setFocusLocation(null);
-              resetDetailSearch();
-              clearCopyFeedback();
             }}
           >
             <Text style={[styles.backButtonText, { color: r.backBtnText }]}>{t.back}</Text>
@@ -544,6 +273,7 @@ export default function RoutesScreen() {
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
+              style={styles.variantScroll}
               contentContainerStyle={styles.variantRow}
             >
               {routeDetail.variants.map((variant) => (
@@ -556,8 +286,6 @@ export default function RoutesScreen() {
                   ]}
                   onPress={() => {
                     setSelectedVariantId(variant.id);
-                    setPressedLocation(null);
-                    clearCopyFeedback();
                     if (selectedRouteId) {
                       loadRouteDetail(selectedRouteId, {
                         shapeVariantId: variant.id,
@@ -579,62 +307,11 @@ export default function RoutesScreen() {
               ))}
             </ScrollView>
 
-            <View style={styles.detailSearchWrap}>
-              <TextInput
-                value={detailSearchQuery}
-                onChangeText={setDetailSearchQuery}
-                placeholder={t.searchAreaPanMap}
-                placeholderTextColor={r.inputPlaceholder}
-                style={[styles.detailSearchInput, { backgroundColor: r.inputBg, borderColor: r.inputBorder, color: r.inputText }]}
-                returnKeyType="search"
-                onFocus={() => setDetailSearchFocused(true)}
-                onBlur={() => setDetailSearchFocused(false)}
-              />
-              {detailSearchFocused &&
-              (detailSearchLoading || detailSearchError || detailSearchQuery.trim().length >= 2) ? (
-                <View style={[styles.detailSuggestionsPanel, { backgroundColor: r.suggestionBg, borderColor: r.suggestionBorder }]}>
-                  {detailSearchLoading ? (
-                    <Text style={[styles.detailSuggestionStatus, { color: r.suggestionStatus }]}>{t.searching}</Text>
-                  ) : detailSearchError ? (
-                    <Text style={[styles.detailSuggestionStatus, { color: r.suggestionStatus }]}>{detailSearchError}</Text>
-                  ) : detailSearchQuery.trim().length >= 2 &&
-                    detailSearchSuggestions.length === 0 ? (
-                    <Text style={[styles.detailSuggestionStatus, { color: r.suggestionStatus }]}>{t.noResults}</Text>
-                  ) : (
-                    detailSearchSuggestions.map((item, index) => (
-                      <Pressable
-                        key={item.id}
-                        onPress={() => handleDetailSearchSelect(item)}
-                        style={({ pressed }) => [
-                          styles.detailSuggestionItem,
-                          pressed ? { backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)" } : null,
-                        ]}
-                      >
-                        <Text style={[styles.detailSuggestionTitle, { color: r.suggestionTitle }]}>{item.title}</Text>
-                        {item.subtitle ? (
-                          <Text style={[styles.detailSuggestionSubtitle, { color: r.suggestionSubtitle }]}>{item.subtitle}</Text>
-                        ) : null}
-                        {index < detailSearchSuggestions.length - 1 ? (
-                          <View style={[styles.detailSuggestionDivider, { backgroundColor: r.suggestionDivider }]} />
-                        ) : null}
-                      </Pressable>
-                    ))
-                  )}
-                </View>
-              ) : null}
-            </View>
-
-            <View style={[styles.mapFrame, { height: routeMapHeight, borderColor: r.mapBorder }]}>
+            <View style={[styles.mapFrame, { flex: 1, borderColor: r.mapBorder }]}>
               <RouteMap
                 routeCoordinates={routeCoordinates}
                 stops={mapStops}
                 mapId={mapId}
-                focusLocation={focusLocation}
-                focusZoom={MAP_FOCUS_ZOOM}
-                onMapPress={(location) => {
-                  setPressedLocation(location);
-                  clearCopyFeedback();
-                }}
               />
             </View>
             {!hasSnappedRouteShape && mapStops.length >= 2 ? (
@@ -642,43 +319,6 @@ export default function RoutesScreen() {
                 {t.routeShapeUnavailable}
               </Text>
             ) : null}
-
-            <View style={[styles.coordinateCard, { backgroundColor: r.coordCardBg, borderColor: r.coordCardBorder }]}>
-              <View style={styles.coordinateTitleRow}>
-                <Text style={[styles.coordinateTitle, { color: r.title }]}>{t.tappedPoint}</Text>
-                <Pressable
-                  style={[
-                    styles.copyButton,
-                    !pressedLocation ? styles.copyButtonDisabled : null,
-                  ]}
-                  onPress={handleCopyPressedLocation}
-                  disabled={!pressedLocation}
-                >
-                  <Text style={styles.copyButtonText}>{t.copyLonLat}</Text>
-                </Pressable>
-              </View>
-              <Text style={[styles.coordinateText, { color: r.coordText }]}>
-                Lat: {pressedLocation ? String(pressedLocation.lat) : "-"}
-              </Text>
-              <Text style={[styles.coordinateText, { color: r.coordText }]}>
-                Lon: {pressedLocation ? String(pressedLocation.lng) : "-"}
-              </Text>
-              {copyFeedback ? (
-                <Text style={styles.copyFeedbackText}>{copyFeedback}</Text>
-              ) : null}
-            </View>
-
-            <ScrollView style={styles.stopsList} contentContainerStyle={[styles.stopsListContent, { paddingBottom: tabBarHeight + 8 }]}>
-              {selectedVariantStops.map((stop) => (
-                <View key={`${selectedVariant.id}_${stop.stopSequence}`} style={[styles.stopRow, { backgroundColor: r.stopRowBg, borderColor: r.stopRowBorder }]}>
-                  <Text style={[styles.stopName, { color: r.title }]}>
-                    {stop.stopSequence}. {stop.station.name}
-                  </Text>
-                  <Text style={[styles.stopMeta, { color: r.coordText }]}>Lat: {String(stop.station.lat)}</Text>
-                  <Text style={[styles.stopMeta, { color: r.coordText }]}>Lon: {String(stop.station.lon)}</Text>
-                </View>
-              ))}
-            </ScrollView>
           </View>
         ) : null}
       </SafeAreaView>
@@ -857,56 +497,12 @@ const styles = StyleSheet.create({
   detailBody: {
     flex: 1,
   },
-  detailSearchWrap: {
-    paddingHorizontal: 16,
-    paddingBottom: 8,
-  },
-  detailSearchInput: {
-    height: 42,
-    borderRadius: 12,
-    backgroundColor: "rgba(255,255,255,0.08)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.14)",
-    color: "white",
-    paddingHorizontal: 12,
-    fontSize: 14,
-  },
-  detailSuggestionsPanel: {
-    marginTop: 8,
-    borderRadius: 12,
-    overflow: "hidden",
-    backgroundColor: "rgba(20,20,20,0.92)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-  },
-  detailSuggestionItem: {
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  detailSuggestionTitle: {
-    color: "white",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  detailSuggestionSubtitle: {
-    marginTop: 2,
-    color: "rgba(255,255,255,0.65)",
-    fontSize: 11,
-  },
-  detailSuggestionDivider: {
-    height: 1,
-    marginTop: 8,
-    backgroundColor: "rgba(255,255,255,0.08)",
-  },
-  detailSuggestionStatus: {
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    color: "rgba(255,255,255,0.72)",
-    fontSize: 12,
+  variantScroll: {
+    flexGrow: 0,
+    paddingBottom: 6,
   },
   variantRow: {
     paddingHorizontal: 16,
-    paddingBottom: 8,
     gap: 8,
   },
   variantChip: {
@@ -930,6 +526,7 @@ const styles = StyleSheet.create({
   },
   mapFrame: {
     marginHorizontal: 16,
+    marginBottom: 8,
     borderRadius: 14,
     overflow: "hidden",
     borderWidth: 1,
@@ -939,78 +536,6 @@ const styles = StyleSheet.create({
     marginTop: 8,
     marginHorizontal: 18,
     color: "rgba(255,255,255,0.65)",
-    fontSize: 12,
-  },
-  coordinateCard: {
-    marginTop: 10,
-    marginHorizontal: 16,
-    borderRadius: 12,
-    padding: 10,
-    backgroundColor: "rgba(255,255,255,0.06)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-  },
-  coordinateTitle: {
-    color: "white",
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  coordinateTitleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 4,
-  },
-  coordinateText: {
-    color: "rgba(255,255,255,0.82)",
-    fontSize: 12,
-    marginTop: 2,
-  },
-  copyButton: {
-    height: 30,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-    backgroundColor: "#1FAE66",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  copyButtonDisabled: {
-    opacity: 0.5,
-  },
-  copyButtonText: {
-    color: "white",
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  copyFeedbackText: {
-    marginTop: 8,
-    color: "rgba(255,255,255,0.78)",
-    fontSize: 12,
-  },
-  stopsList: {
-    flex: 1,
-    marginTop: 10,
-  },
-  stopsListContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 16,
-    gap: 8,
-  },
-  stopRow: {
-    borderRadius: 10,
-    padding: 10,
-    backgroundColor: "rgba(255,255,255,0.04)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
-  },
-  stopName: {
-    color: "white",
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  stopMeta: {
-    marginTop: 2,
-    color: "rgba(255,255,255,0.72)",
     fontSize: 12,
   },
 });

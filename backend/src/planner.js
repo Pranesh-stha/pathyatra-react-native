@@ -30,7 +30,7 @@ const EXPANDED_DEST_NEARBY_LIMIT = 30;
 const EXPANDED_NEARBY_RADIUS_M = 5000;
 const MAX_EXACT_WALK_EVALUATIONS = 10;
 const MAX_SHORTLIST_SIZE = 20;
-const MAX_FINAL_CANDIDATE_EVALUATIONS = 5;
+const MAX_FINAL_CANDIDATE_EVALUATIONS = 8;
 const BUS_FALLBACK_MIN_DISTANCE_M = 8;
 const BUS_FALLBACK_SPEED_MPS = 7.5;
 const BUS_FALLBACK_MIN_DURATION_S = 8;
@@ -248,6 +248,10 @@ function isEdgeDistanceReasonable(distanceM, fromPoint, toPoint) {
   return distanceM >= minDistanceM && distanceM <= maxDistanceM;
 }
 
+function isRoadSnappedSource(edge) {
+  return edge.source === "maptiler" || edge.source === "osrm";
+}
+
 function getUsableEdge({
   variantEdges,
   seq,
@@ -268,11 +272,20 @@ function getUsableEdge({
   if (!isEdgeDistanceReasonable(distanceM, fromPoint, toPoint)) return null;
 
   if (!requireGeometry) {
+    // For metrics-only usage, accept any source
     return { edge, distanceM, durationS, geometry: null };
   }
 
+  // Only trust geometry from actual routing engines (not straight-line fallbacks)
+  if (!isRoadSnappedSource(edge)) return null;
+
   const geometry = parseLineGeoJson(edge.line_geojson);
   if (!geometry) return null;
+
+  // A real road-snapped route should have more than 2 coordinates
+  // (2 coordinates is just a straight line between endpoints)
+  if (geometry.coordinates.length <= 2 && distanceM > 100) return null;
+
   return { edge, distanceM, durationS, geometry };
 }
 
@@ -400,23 +413,10 @@ async function fetchWalkingLegWithCache({
     return cache.get(cacheKey);
   }
 
-  let leg = null;
-  try {
-    leg = await runWithTimeout(DIRECTIONS_CALL_TIMEOUT_MS, (walkSignal) =>
-      fetchDirectionsLeg({
-        profile: "walking",
-        from: { lat: from.lat, lon: from.lon },
-        to: { lat: to.lat, lon: to.lon },
-        signal: walkSignal,
-      })
-    );
-  } catch {
-    leg = null;
-  }
-
-  if (!leg || !Number.isFinite(Number(leg.distanceM)) || !Number.isFinite(Number(leg.durationS))) {
-    leg = buildFallbackWalkLeg(from, to);
-  }
+  // Use straight-line displacement for walking segments.
+  // Walking routes don't need road-snapping since pedestrians can walk
+  // directly across open areas, cut through paths, cross roads, etc.
+  const leg = buildFallbackWalkLeg(from, to);
 
   cache.set(cacheKey, leg);
   return leg;
@@ -458,10 +458,31 @@ async function buildBusSegment({
       continue;
     }
 
-    const fallbackEdge = buildFallbackBusEdgeGeometry(fromPoint, toPoint);
-    distanceM += fallbackEdge.distanceM;
-    durationS += fallbackEdge.durationS;
-    lineStrings.push(fallbackEdge.geometry);
+    // Try fetching actual driving directions instead of a straight line
+    let fetchedLeg = null;
+    try {
+      fetchedLeg = await runWithTimeout(DIRECTIONS_CALL_TIMEOUT_MS, (signal) =>
+        fetchDirectionsLeg({
+          profile: "driving",
+          from: { lat: fromPoint.lat, lon: fromPoint.lon },
+          to: { lat: toPoint.lat, lon: toPoint.lon },
+          signal,
+        })
+      );
+    } catch {
+      fetchedLeg = null;
+    }
+
+    if (fetchedLeg?.geometry) {
+      distanceM += fetchedLeg.distanceM;
+      durationS += fetchedLeg.durationS;
+      lineStrings.push(fetchedLeg.geometry);
+    } else {
+      const fallbackEdge = buildFallbackBusEdgeGeometry(fromPoint, toPoint);
+      distanceM += fallbackEdge.distanceM;
+      durationS += fallbackEdge.durationS;
+      lineStrings.push(fallbackEdge.geometry);
+    }
   }
 
   if (distanceM <= 0 || durationS <= 0) return null;
@@ -640,17 +661,21 @@ function buildEvaluationShortlist(candidateOptions) {
     .sort((a, b) => getApproxSortScore(a) - getApproxSortScore(b))
     .slice(0, MAX_EXACT_WALK_EVALUATIONS);
 
-  const nearestByVariantAndOrigin = new Map();
+  // For each route, preserve the option with the least total walking
+  // (origin walk + destination walk).  This ensures closer boarding AND
+  // alighting stops are always considered, even when their total trip
+  // time is not among the best (extra bus time is cheap for passengers).
+  const leastWalkByRoute = new Map();
   for (const option of candidateOptions) {
-    const key = `${option.routeId}:${option.variantId}:${option.originSeq}`;
-    const current = nearestByVariantAndOrigin.get(key);
-    const optionDestDistance = Number(option.destinationStation.distanceM) || Number.POSITIVE_INFINITY;
-    const currentDestDistance = current
-      ? Number(current.destinationStation.distanceM) || Number.POSITIVE_INFINITY
+    const key = option.routeId;
+    const current = leastWalkByRoute.get(key);
+    const optionWalk = Number(option.approxWalkDistanceM) || Number.POSITIVE_INFINITY;
+    const currentWalk = current
+      ? Number(current.approxWalkDistanceM) || Number.POSITIVE_INFINITY
       : Number.POSITIVE_INFINITY;
 
-    if (!current || optionDestDistance < currentDestDistance) {
-      nearestByVariantAndOrigin.set(key, option);
+    if (!current || optionWalk < currentWalk) {
+      leastWalkByRoute.set(key, option);
     }
   }
 
@@ -661,7 +686,7 @@ function buildEvaluationShortlist(candidateOptions) {
     )}`;
     merged.set(key, option);
   }
-  for (const option of nearestByVariantAndOrigin.values()) {
+  for (const option of leastWalkByRoute.values()) {
     const key = `${option.variantId}:${option.originSeq}:${option.destinationSeq}:${Number(
       option.wrapAround ? 1 : 0
     )}`;
@@ -745,7 +770,32 @@ function buildFastCandidateRanking({
     return a.approxTotalWalkDistanceM - b.approxTotalWalkDistanceM;
   });
 
-  return ranked;
+  // Ensure the option with the least total walking per route is always
+  // included in the final evaluation set, even if its total score is not
+  // in the top N.  This prevents picking farther boarding/alighting stops
+  // when closer ones exist on the same route.
+  const leastWalkByRoute = new Map();
+  for (const entry of ranked) {
+    const key = entry.option.routeId;
+    const current = leastWalkByRoute.get(key);
+    const entryWalk = entry.approxWalkDistanceM ?? Number.POSITIVE_INFINITY;
+    const currentWalk = current
+      ? current.approxWalkDistanceM ?? Number.POSITIVE_INFINITY
+      : Number.POSITIVE_INFINITY;
+    if (!current || entryWalk < currentWalk) {
+      leastWalkByRoute.set(key, entry);
+    }
+  }
+
+  const topByScore = ranked.slice(0, MAX_FINAL_CANDIDATE_EVALUATIONS);
+  const topSet = new Set(topByScore);
+  for (const entry of leastWalkByRoute.values()) {
+    if (!topSet.has(entry)) {
+      topByScore.push(entry);
+    }
+  }
+
+  return topByScore;
 }
 
 function buildVariantSearchOrder(variants, routePriority) {
@@ -959,7 +1009,7 @@ export async function planSingleBusTrip({
     fromLon,
     toLat,
     toLon,
-  }).slice(0, MAX_FINAL_CANDIDATE_EVALUATIONS);
+  });
   if (rankedCandidates.length === 0) {
     return buildNoRouteResponse(
       "NO_DIRECT_ROUTE",
@@ -970,7 +1020,7 @@ export async function planSingleBusTrip({
 
   let best = null;
   let bestAdjustedScore = Number.POSITIVE_INFINITY;
-  let bestFinalWalkDistanceM = Number.POSITIVE_INFINITY;
+  let bestTotalWalkDistanceM = Number.POSITIVE_INFINITY;
 
   for (const ranked of rankedCandidates) {
     try {
@@ -1009,41 +1059,56 @@ export async function planSingleBusTrip({
       const adjustedTotalScoreS =
         totalDurationS - (Number(option.priorityBonusS) || 0);
 
+      const boardingWalkDistanceM =
+        Number(walkToBoarding.distanceM) || Number.POSITIVE_INFINITY;
       const finalWalkDistanceM =
         Number(walkToDestination.distanceM) || Number.POSITIVE_INFINITY;
-      const isSameRouteAndBoarding =
+      const totalWalkDistanceM = boardingWalkDistanceM + finalWalkDistanceM;
+
+      const isSameVariant =
         best &&
         best.option.routeId === option.routeId &&
         best.option.variantId === option.variantId &&
-        best.option.originSeq === option.originSeq &&
         Boolean(best.option.wrapAround) === Boolean(option.wrapAround);
+
+      const isSameRoute =
+        best && best.option.routeId === option.routeId;
 
       let shouldReplace = false;
       if (!best) {
         shouldReplace = true;
-      } else if (isSameRouteAndBoarding) {
-        // Within the same chosen service, prefer alighting that minimizes final walk.
-        if (finalWalkDistanceM + 1 < bestFinalWalkDistanceM) {
+      } else if (isSameVariant) {
+        // Same variant: extra bus time is free (passenger is on the bus).
+        // Always prefer the option that minimizes total walking distance.
+        if (totalWalkDistanceM + 1 < bestTotalWalkDistanceM) {
           shouldReplace = true;
         } else if (
-          Math.abs(finalWalkDistanceM - bestFinalWalkDistanceM) <= 1 &&
+          Math.abs(totalWalkDistanceM - bestTotalWalkDistanceM) <= 1 &&
           adjustedTotalScoreS < bestAdjustedScore
         ) {
+          shouldReplace = true;
+        }
+      } else if (isSameRoute) {
+        // Same route, different variant/direction: prefer less walking
+        // unless total time penalty is extreme (> 10 minutes).
+        if (totalWalkDistanceM + 10 < bestTotalWalkDistanceM) {
+          shouldReplace = adjustedTotalScoreS < bestAdjustedScore + 600;
+        } else if (adjustedTotalScoreS + 1 < bestAdjustedScore) {
           shouldReplace = true;
         }
       } else if (adjustedTotalScoreS + 1 < bestAdjustedScore) {
         shouldReplace = true;
       } else if (
-        Math.abs(adjustedTotalScoreS - bestAdjustedScore) <= 120 &&
-        finalWalkDistanceM + 5 < bestFinalWalkDistanceM
+        Math.abs(adjustedTotalScoreS - bestAdjustedScore) <= 180 &&
+        totalWalkDistanceM + 5 < bestTotalWalkDistanceM
       ) {
-        // If ETA is close, prefer less final walking.
+        // If ETA is close (within 3 min), prefer less total walking.
         shouldReplace = true;
       }
 
       if (shouldReplace) {
         bestAdjustedScore = adjustedTotalScoreS;
-        bestFinalWalkDistanceM = finalWalkDistanceM;
+        bestTotalWalkDistanceM = totalWalkDistanceM;
         best = {
           option,
           busSegment,

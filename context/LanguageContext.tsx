@@ -1,4 +1,7 @@
-﻿import React, { createContext, useContext, useState } from 'react';
+import React, { createContext, useContext, useEffect, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+const STORAGE_KEY = 'pathyatra_language';
 
 export type Language = 'en' | 'ne';
 
@@ -51,6 +54,10 @@ type Translations = {
   copyLonLat: string;
   copied: string;
   routeShapeUnavailable: string;
+
+  // Nearby stops
+  nearbyStops: string;
+  noNearbyStops: string;
 };
 
 const en: Translations = {
@@ -98,53 +105,59 @@ const en: Translations = {
   copyLonLat: 'Copy lon/lat',
   copied: 'Copied',
   routeShapeUnavailable: 'Exact road path is temporarily unavailable for this variant.',
+
+  nearbyStops: 'Nearby Stops',
+  noNearbyStops: 'No nearby stops found.',
 };
 
 const ne: Translations = {
-  home: 'à¤—à¥ƒà¤¹',
-  routes: 'à¤®à¤¾à¤°à¥à¤—à¤¹à¤°à¥‚',
-  settings: 'à¤¸à¥‡à¤Ÿà¤¿à¤™à¥à¤¸',
+  home: 'गृह',
+  routes: 'मार्गहरू',
+  settings: 'सेटिङ्स',
 
-  settingsTitle: 'à¤¸à¥‡à¤Ÿà¤¿à¤™à¥à¤¸',
-  darkMode: 'à¤¡à¤¾à¤°à¥à¤• à¤®à¥‹à¤¡',
-  switchToLight: 'à¤²à¤¾à¤‡à¤Ÿ à¤¥à¤¿à¤®à¤®à¤¾ à¤¸à¥à¤µà¤¿à¤š à¤—à¤°à¥à¤¨à¥à¤¹à¥‹à¤¸à¥',
-  switchToDark: 'à¤¡à¤¾à¤°à¥à¤• à¤¥à¤¿à¤®à¤®à¤¾ à¤¸à¥à¤µà¤¿à¤š à¤—à¤°à¥à¤¨à¥à¤¹à¥‹à¤¸à¥',
-  language: 'à¤­à¤¾à¤·à¤¾',
-  chooseLanguage: 'à¤†à¤«à¥à¤¨à¥‹ à¤®à¤¨à¤ªà¤°à¥à¤¨à¥‡ à¤­à¤¾à¤·à¤¾ à¤›à¤¾à¤¨à¥à¤¨à¥à¤¹à¥‹à¤¸à¥',
-  appInfo: 'à¤à¤ª à¤œà¤¾à¤¨à¤•à¤¾à¤°à¥€',
-  version: 'à¤¸à¤‚à¤¸à¥à¤•à¤°à¤£ à¥§.à¥¦.à¥¦',
-  feedback: 'à¤ªà¥à¤°à¤¤à¤¿à¤•à¥à¤°à¤¿à¤¯à¤¾',
-  feedbackSubtitle: 'à¤¹à¤¾à¤®à¥€à¤¸à¤à¤— à¤†à¤«à¥à¤¨à¥‹ à¤µà¤¿à¤šà¤¾à¤° à¤¸à¤¾à¤à¤¾ à¤—à¤°à¥à¤¨à¥à¤¹à¥‹à¤¸à¥',
+  settingsTitle: 'सेटिङ्स',
+  darkMode: 'डार्क मोड',
+  switchToLight: 'लाइट थिममा स्विच गर्नुहोस्',
+  switchToDark: 'डार्क थिममा स्विच गर्नुहोस्',
+  language: 'भाषा',
+  chooseLanguage: 'आफ्नो मनपर्ने भाषा छान्नुहोस्',
+  appInfo: 'एप जानकारी',
+  version: 'संस्करण १.०.०',
+  feedback: 'प्रतिक्रिया',
+  feedbackSubtitle: 'हामीसँग आफ्नो विचार साझा गर्नुहोस्',
 
-  searchPlaceholder: 'à¤ à¤¾à¤‰à¤à¤¹à¤°à¥‚, à¤¹à¥‹à¤Ÿà¤²à¤¹à¤°à¥‚, à¤²à¥à¤¯à¤¾à¤¨à¥à¤¡à¤®à¤¾à¤°à¥à¤•à¤¹à¤°à¥‚ à¤–à¥‹à¤œà¥à¤¨à¥à¤¹à¥‹à¤¸à¥',
-  searching: 'à¤–à¥‹à¤œà¥à¤¦à¥ˆ...',
-  noResults: 'à¤•à¥à¤¨à¥ˆ à¤ªà¤°à¤¿à¤£à¤¾à¤® à¤­à¥‡à¤Ÿà¤¿à¤à¤¨à¥¤',
-  lookingUpPlace: 'à¤ à¤¾à¤‰à¤ à¤–à¥‹à¤œà¥à¤¦à¥ˆ...',
-  from: 'à¤¬à¤¾à¤Ÿ',
-  searchStartLocation: 'à¤¸à¥à¤°à¥à¤µà¤¾à¤¤ à¤¸à¥à¤¥à¤¾à¤¨ à¤–à¥‹à¤œà¥à¤¨à¥à¤¹à¥‹à¤¸à¥',
-  yourLocation: 'à¤¤à¤ªà¤¾à¤ˆà¤‚à¤•à¥‹ à¤¸à¥à¤¥à¤¾à¤¨',
-  boardAt: 'à¤šà¤¢à¥à¤¨à¥‡ à¤ à¤¾à¤‰à¤',
-  getOffAt: 'à¤“à¤°à¥à¤²à¤¨à¥‡ à¤ à¤¾à¤‰à¤',
-  planning: 'à¤¯à¥‹à¤œà¤¨à¤¾ à¤¬à¤¨à¤¾à¤‰à¤à¤¦à¥ˆ...',
-  directions: 'à¤¦à¤¿à¤¶à¤¾à¤¨à¤¿à¤°à¥à¤¦à¥‡à¤¶',
-  busRoute: 'à¤¬à¤¸ à¤®à¤¾à¤°à¥à¤—',
-  selectDestination: 'à¤ªà¤¹à¤¿à¤²à¥‡ à¤—à¤¨à¥à¤¤à¤µà¥à¤¯ à¤›à¤¾à¤¨à¥à¤¨à¥à¤¹à¥‹à¤¸à¥à¥¤',
-  fromUnavailable: 'à¤¸à¥à¤°à¥à¤µà¤¾à¤¤ à¤¸à¥à¤¥à¤¾à¤¨ à¤‰à¤ªà¤²à¤¬à¥à¤§ à¤›à¥ˆà¤¨à¥¤ à¤¸à¥à¤°à¥à¤µà¤¾à¤¤ à¤¬à¤¿à¤¨à¥à¤¦à¥ à¤›à¤¾à¤¨à¥à¤¨à¥à¤¹à¥‹à¤¸à¥à¥¤',
-  chooseFromLocation: 'à¤¸à¥à¤°à¥à¤µà¤¾à¤¤ à¤¸à¥à¤¥à¤¾à¤¨ à¤›à¤¾à¤¨à¥à¤¨à¥à¤¹à¥‹à¤¸à¥ à¤µà¤¾ à¤¤à¤ªà¤¾à¤ˆà¤‚à¤•à¥‹ à¤¸à¥à¤¥à¤¾à¤¨ à¤¥à¤¿à¤šà¥à¤¨à¥à¤¹à¥‹à¤¸à¥à¥¤',
+  searchPlaceholder: 'ठाउँहरू, होटलहरू, ल्यान्डमार्कहरू खोज्नुहोस्',
+  searching: 'खोज्दै...',
+  noResults: 'कुनै परिणाम भेटिएन।',
+  lookingUpPlace: 'ठाउँ खोज्दै...',
+  from: 'बाट',
+  searchStartLocation: 'सुरुवात स्थान खोज्नुहोस्',
+  yourLocation: 'तपाईंको स्थान',
+  boardAt: 'चढ्ने ठाउँ',
+  getOffAt: 'ओर्लने ठाउँ',
+  planning: 'योजना बनाउँदै...',
+  directions: 'दिशानिर्देश',
+  busRoute: 'बस मार्ग',
+  selectDestination: 'पहिले गन्तव्य छान्नुहोस्।',
+  fromUnavailable: 'सुरुवात स्थान उपलब्ध छैन। सुरुवात बिन्दु छान्नुहोस्।',
+  chooseFromLocation: 'सुरुवात स्थान छान्नुहोस् वा तपाईंको स्थान थिच्नुहोस्।',
 
-  allBusRoutes: 'à¤¸à¤¬à¥ˆ à¤¬à¤¸ à¤®à¤¾à¤°à¥à¤—à¤¹à¤°à¥‚',
-  reload: 'à¤ªà¥à¤¨: à¤²à¥‹à¤¡',
-  searchRouteName: 'à¤®à¤¾à¤°à¥à¤—à¤•à¥‹ à¤¨à¤¾à¤® à¤–à¥‹à¤œà¥à¤¨à¥à¤¹à¥‹à¤¸à¥',
-  loadingRoutes: 'à¤®à¤¾à¤°à¥à¤—à¤¹à¤°à¥‚ à¤²à¥‹à¤¡ à¤¹à¥à¤à¤¦à¥ˆà¤›...',
-  noMatchingRoutes: 'à¤•à¥à¤¨à¥ˆ à¤®à¤¿à¤²à¥à¤¦à¥‹ à¤®à¤¾à¤°à¥à¤— à¤­à¥‡à¤Ÿà¤¿à¤à¤¨à¥¤',
-  back: 'à¤ªà¤›à¤¾à¤¡à¤¿',
-  routeDetail: 'à¤®à¤¾à¤°à¥à¤— à¤µà¤¿à¤µà¤°à¤£',
-  loadingRouteMap: 'à¤®à¤¾à¤°à¥à¤— à¤¨à¤•à¥à¤¸à¤¾ à¤²à¥‹à¤¡ à¤¹à¥à¤à¤¦à¥ˆà¤›...',
-  searchAreaPanMap: 'à¤¨à¤•à¥à¤¸à¤¾ à¤ªà¥à¤¯à¤¾à¤¨ à¤—à¤°à¥à¤¨ à¤•à¥à¤·à¥‡à¤¤à¥à¤° à¤–à¥‹à¤œà¥à¤¨à¥à¤¹à¥‹à¤¸à¥',
-  tappedPoint: 'à¤Ÿà¥à¤¯à¤¾à¤ª à¤—à¤°à¤¿à¤à¤•à¥‹ à¤¬à¤¿à¤¨à¥à¤¦à¥',
-  copyLonLat: 'lon/lat à¤•à¤ªà¥€ à¤—à¤°à¥à¤¨à¥à¤¹à¥‹à¤¸à¥',
-  copied: 'à¤•à¤ªà¥€ à¤­à¤¯à¥‹',
-  routeShapeUnavailable: 'à¤¯à¤¸ à¤­à¥‡à¤°à¤¿à¤¯à¤¨à¥à¤Ÿà¤•à¥‹ à¤²à¤¾à¤—à¤¿ à¤¸à¤Ÿà¥€à¤• à¤¸à¤¡à¤• à¤®à¤¾à¤°à¥à¤— à¤…à¤¸à¥à¤¥à¤¾à¤¯à¥€ à¤°à¥‚à¤ªà¤®à¤¾ à¤‰à¤ªà¤²à¤¬à¥à¤§ à¤›à¥ˆà¤¨à¥¤',
+  allBusRoutes: 'सबै बस मार्गहरू',
+  reload: 'पुन: लोड',
+  searchRouteName: 'मार्गको नाम खोज्नुहोस्',
+  loadingRoutes: 'मार्गहरू लोड हुँदैछ...',
+  noMatchingRoutes: 'कुनै मिल्दो मार्ग भेटिएन।',
+  back: 'पछाडि',
+  routeDetail: 'मार्ग विवरण',
+  loadingRouteMap: 'मार्ग नक्सा लोड हुँदैछ...',
+  searchAreaPanMap: 'नक्सा प्यान गर्न क्षेत्र खोज्नुहोस्',
+  tappedPoint: 'ट्याप गरिएको बिन्दु',
+  copyLonLat: 'lon/lat कपी गर्नुहोस्',
+  copied: 'कपी भयो',
+  routeShapeUnavailable: 'यस भेरियन्टको लागि सटीक सडक मार्ग अस्थायी रूपमा उपलब्ध छैन।',
+
+  nearbyStops: 'नजिकका बिसौनी',
+  noNearbyStops: 'नजिकमा कुनै बिसौनी भेटिएन।',
 };
 
 const translations = { en, ne };
@@ -162,8 +175,19 @@ const LanguageContext = createContext<LanguageContextType>({
 });
 
 export function LanguageProvider({ children }: { children: React.ReactNode }) {
-  const [language, setLanguage] = useState<Language>('en');
+  const [language, setLanguageState] = useState<Language>('en');
   const t = translations[language];
+
+  useEffect(() => {
+    AsyncStorage.getItem(STORAGE_KEY).then((value) => {
+      if (value === 'en' || value === 'ne') setLanguageState(value);
+    });
+  }, []);
+
+  const setLanguage = (lang: Language) => {
+    setLanguageState(lang);
+    AsyncStorage.setItem(STORAGE_KEY, lang);
+  };
 
   return (
     <LanguageContext.Provider value={{ language, setLanguage, t }}>
@@ -175,4 +199,3 @@ export function LanguageProvider({ children }: { children: React.ReactNode }) {
 export function useLanguage() {
   return useContext(LanguageContext);
 }
-

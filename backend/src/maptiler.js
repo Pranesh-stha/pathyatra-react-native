@@ -4,6 +4,12 @@ import { normalizeLineStringGeometry } from "./geo.js";
 
 const sanitizeBaseUrl = (value) => value.replace(/\/+$/, "");
 
+// Circuit breaker: skip MapTiler if it has failed recently
+let maptilerFailCount = 0;
+let maptilerSkipUntil = 0;
+const MAPTILER_FAIL_THRESHOLD = 3;
+const MAPTILER_SKIP_DURATION_MS = 5 * 60 * 1000; // Skip for 5 minutes after repeated failures
+
 function normalizeProfile(profile) {
   return profile === "driving" ? "driving" : "walking";
 }
@@ -128,49 +134,67 @@ export async function fetchDirectionsPath({ profile, points, signal }) {
   const baseUrl = sanitizeBaseUrl(config.maptilerDirectionsBaseUrl);
   const coordinates = buildCoordinates(normalizedPoints);
 
-  const candidateUrls = buildCandidateUrls(
-    baseUrl,
-    profileName,
-    coordinates,
-    config.maptilerApiKey
-  );
-
   let lastStatus = null;
   let lastBody = "";
 
-  for (const url of candidateUrls) {
-    const response = await fetch(url, {
-      method: "GET",
-      signal,
-      headers: {
-        Accept: "application/json",
-      },
-    });
+  // Circuit breaker: skip MapTiler if it has been failing repeatedly
+  const skipMapTiler = Date.now() < maptilerSkipUntil;
 
-    if (!response.ok) {
-      lastStatus = response.status;
-      lastBody = await response.text().catch(() => "");
-      // Try another candidate for 404/405 style endpoint mismatch.
-      if (response.status === 404 || response.status === 405) {
-        continue;
+  if (!skipMapTiler) {
+    const candidateUrls = buildCandidateUrls(
+      baseUrl,
+      profileName,
+      coordinates,
+      config.maptilerApiKey
+    );
+
+    for (const url of candidateUrls) {
+      const response = await fetch(url, {
+        method: "GET",
+        signal,
+        headers: {
+          Accept: "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        lastStatus = response.status;
+        lastBody = await response.text().catch(() => "");
+        // Try another candidate for 404/405 style endpoint mismatch.
+        if (response.status === 404 || response.status === 405) {
+          continue;
+        }
+        throw new HttpError(502, `MapTiler directions failed (${response.status}).`, lastBody);
       }
-      throw new HttpError(502, `MapTiler directions failed (${response.status}).`, lastBody);
+
+      // MapTiler succeeded - reset circuit breaker
+      maptilerFailCount = 0;
+      maptilerSkipUntil = 0;
+      const data = await response.json();
+      return parseMapTilerRoute(data);
     }
 
-    const data = await response.json();
-    return parseMapTilerRoute(data);
+    // All MapTiler candidates failed - increment circuit breaker
+    maptilerFailCount += 1;
+    if (maptilerFailCount >= MAPTILER_FAIL_THRESHOLD) {
+      maptilerSkipUntil = Date.now() + MAPTILER_SKIP_DURATION_MS;
+      console.log(
+        `MapTiler directions failed ${maptilerFailCount} times, skipping for ${MAPTILER_SKIP_DURATION_MS / 1000}s`
+      );
+    }
   }
 
-  // Fallback: if MapTiler routing endpoint is unavailable for this key,
-  // use OSRM so imports/planning can still proceed.
+  // Fallback: use OSRM directly (much faster when MapTiler is down)
   try {
     return await fetchOsrmPath({ profile, points: normalizedPoints, signal });
   } catch (osrmError) {
     throw new HttpError(
       502,
-      `MapTiler directions failed (${lastStatus ?? "unknown"}) and OSRM fallback failed.`,
+      `MapTiler directions failed (${lastStatus ?? "skipped"}) and OSRM fallback failed.`,
       {
-        maptiler: lastBody || "No successful MapTiler endpoint variant.",
+        maptiler: skipMapTiler
+          ? "Skipped (circuit breaker active)."
+          : lastBody || "No successful MapTiler endpoint variant.",
         osrm: osrmError instanceof HttpError ? osrmError.details ?? osrmError.message : String(osrmError),
       }
     );

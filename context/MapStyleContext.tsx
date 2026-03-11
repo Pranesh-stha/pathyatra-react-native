@@ -1,4 +1,7 @@
-import React, { createContext, useContext, useMemo, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+const STORAGE_KEY = 'pathyatra_mapStyle';
 
 export type MapStyle = 'default' | 'satellite';
 
@@ -24,7 +27,18 @@ const MapStyleContext = createContext<MapStyleContextType>({
 });
 
 export function MapStyleProvider({ children }: { children: React.ReactNode }) {
-  const [mapStyle, setMapStyle] = useState<MapStyle>('default');
+  const [mapStyle, setMapStyleState] = useState<MapStyle>('default');
+
+  useEffect(() => {
+    AsyncStorage.getItem(STORAGE_KEY).then((value) => {
+      if (value === 'default' || value === 'satellite') setMapStyleState(value);
+    });
+  }, []);
+
+  const setMapStyle = (style: MapStyle) => {
+    setMapStyleState(style);
+    AsyncStorage.setItem(STORAGE_KEY, style);
+  };
 
   const value = useMemo(
     () => ({
@@ -33,7 +47,7 @@ export function MapStyleProvider({ children }: { children: React.ReactNode }) {
       isSatellite: mapStyle === 'satellite',
       setMapStyle,
       toggleMapStyle: () =>
-        setMapStyle((prev) => (prev === 'satellite' ? 'default' : 'satellite')),
+        setMapStyle(mapStyle === 'satellite' ? 'default' : 'satellite'),
     }),
     [mapStyle]
   );
@@ -44,4 +58,3 @@ export function MapStyleProvider({ children }: { children: React.ReactNode }) {
 export function useMapStyle() {
   return useContext(MapStyleContext);
 }
-

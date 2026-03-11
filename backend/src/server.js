@@ -153,9 +153,14 @@ function buildEdgeBySeq(edgeRows) {
 function getTrustedEdgeLine(edge) {
   if (!edge) return null;
   if (!(edge.source === "maptiler" || edge.source === "osrm")) return null;
-  const hasEdgeMetrics = (Number(edge.distance_m) || 0) > 0 && (Number(edge.duration_s) || 0) > 0;
-  if (!hasEdgeMetrics) return null;
-  return parseLineGeoJson(edge.line_geojson);
+  const distanceM = Number(edge.distance_m) || 0;
+  const durationS = Number(edge.duration_s) || 0;
+  if (distanceM <= 0 || durationS <= 0) return null;
+  const geometry = parseLineGeoJson(edge.line_geojson);
+  if (!geometry) return null;
+  // Reject straight-line geometry (only 2 coordinates) for non-trivial distances
+  if (geometry.coordinates.length <= 2 && distanceM > 100) return null;
+  return geometry;
 }
 
 async function fetchRoadChunkLine(stationsChunk, { retries = 2 } = {}) {
@@ -211,8 +216,9 @@ async function buildRoadLineFromChunkLegs(stationsChunk, edgeBySeq) {
           };
         }
 
+        // Use straight-line fallback only for this specific leg
         return {
-          line: null,
+          line: buildStraightSegment(from, to),
           usedStraightFallback: true,
         };
       })()
@@ -220,20 +226,21 @@ async function buildRoadLineFromChunkLegs(stationsChunk, edgeBySeq) {
   }
 
   const legResults = await Promise.all(legTasks);
-  const hasMissingRoadLeg = legResults.some((entry) => entry.usedStraightFallback || !entry.line);
-  if (hasMissingRoadLeg) {
+  const usedAnyFallback = legResults.some((entry) => entry.usedStraightFallback);
+  const lines = legResults.map((entry) => entry.line).filter(Boolean);
+  if (lines.length === 0) {
     return {
       line: null,
       usedStraightFallback: true,
     };
   }
   return {
-    line: mergeLineStrings(legResults.map((entry) => entry.line)),
-    usedStraightFallback: false,
+    line: mergeLineStrings(lines),
+    usedStraightFallback: usedAnyFallback,
   };
 }
 
-function buildVariantShapeFromEdges({
+async function buildVariantShapeFromEdges({
   variantId,
   sortedStopRows,
   edgesByVariantId,
@@ -263,7 +270,29 @@ function buildVariantShapeFromEdges({
       continue;
     }
 
-    lines.push(buildStraightSegment(fromPoint, toPoint));
+    // Try fetching actual driving directions instead of a straight line
+    let fetchedLine = null;
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), ROUTE_SHAPE_REQUEST_TIMEOUT_MS);
+      try {
+        const result = await fetchDirectionsPath({
+          profile: "driving",
+          points: [
+            { lat: Number(fromPoint.lat), lon: Number(fromPoint.lon) },
+            { lat: Number(toPoint.lat), lon: Number(toPoint.lon) },
+          ],
+          signal: controller.signal,
+        });
+        fetchedLine = normalizeLineStringGeometry(result?.geometry);
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    } catch {
+      fetchedLine = null;
+    }
+
+    lines.push(fetchedLine ?? buildStraightSegment(fromPoint, toPoint));
   }
 
   return (
@@ -310,12 +339,6 @@ async function buildSnappedShapeFromStops(
 
   const chunkResults = await Promise.all(chunkTasks);
   const hasFallback = chunkResults.some((entry) => entry.usedStraightFallback || !entry.line);
-  if (hasFallback) {
-    return {
-      shape: null,
-      usedStraightFallback: true,
-    };
-  }
 
   const lines = chunkResults.map((entry) => entry.line).filter(Boolean);
   const mergedLine = mergeLineStrings(lines);
@@ -328,7 +351,7 @@ async function buildSnappedShapeFromStops(
 
   return {
     shape: mergedLine,
-    usedStraightFallback: false,
+    usedStraightFallback: hasFallback,
   };
 }
 
@@ -417,7 +440,7 @@ async function formatRouteResponse(
         }
       }
     } else {
-      shape = buildVariantShapeFromEdges({
+      shape = await buildVariantShapeFromEdges({
         variantId: variant.id,
         sortedStopRows,
         edgesByVariantId,

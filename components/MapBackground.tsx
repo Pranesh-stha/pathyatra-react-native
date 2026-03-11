@@ -29,6 +29,7 @@ type Props = {
   initialCenter?: { lng: number; lat: number; zoom?: number };
   userLocation?: { lng: number; lat: number };
   selectedLocation?: { lng: number; lat: number } | null;
+  fromLocation?: { lng: number; lat: number } | null;
   routeSegments?: MapPolylineSegment[];
   onMapPress?: (location: { lng: number; lat: number }) => void;
   mapId?: string; // e.g. "streets-v2", "outdoor-v2", etc.
@@ -39,6 +40,7 @@ const MapBackground = forwardRef<MapBackgroundHandle, Props>(function MapBackgro
     initialCenter = { lng: 85.324, lat: 27.7172, zoom: 12 },
     userLocation,
     selectedLocation = null,
+    fromLocation = null,
     routeSegments = [],
     onMapPress,
     mapId = "openstreetmap",
@@ -150,6 +152,34 @@ const MapBackground = forwardRef<MapBackgroundHandle, Props>(function MapBackgro
       if (selectedMarker) {
         selectedMarker.remove();
         selectedMarker = null;
+      }
+    };
+
+    let fromMarker = null;
+    const getFromMarker = () => {
+      if (fromMarker) return fromMarker;
+      const fromDot = document.createElement("div");
+      fromDot.style.width = "16px";
+      fromDot.style.height = "16px";
+      fromDot.style.borderRadius = "50%";
+      fromDot.style.background = "#2D7FF9";
+      fromDot.style.border = "3px solid #fff";
+      fromDot.style.boxShadow = "0 0 8px rgba(0,0,0,0.4)";
+      fromMarker = new maplibregl.Marker({ element: fromDot })
+        .setLngLat([${initialCenter.lng}, ${initialCenter.lat}])
+        .addTo(map);
+      return fromMarker;
+    };
+
+    window.setFromLocation = (lng, lat) => {
+      const marker = getFromMarker();
+      marker.setLngLat([lng, lat]);
+    };
+
+    window.clearFromLocation = () => {
+      if (fromMarker) {
+        fromMarker.remove();
+        fromMarker = null;
       }
     };
 
@@ -323,6 +353,21 @@ const MapBackground = forwardRef<MapBackgroundHandle, Props>(function MapBackgro
       `window.setSelectedLocation && window.setSelectedLocation(${selectedLng}, ${selectedLat}); true;`
     );
   }, [isMapReady, key, selectedLocation?.lat, selectedLocation?.lng]);
+
+  useEffect(() => {
+    const fromLat = fromLocation?.lat;
+    const fromLng = fromLocation?.lng;
+    if (!key || !isMapReady) return;
+    if (!Number.isFinite(fromLat) || !Number.isFinite(fromLng)) {
+      webViewRef.current?.injectJavaScript(
+        "window.clearFromLocation && window.clearFromLocation(); true;"
+      );
+      return;
+    }
+    webViewRef.current?.injectJavaScript(
+      `window.setFromLocation && window.setFromLocation(${fromLng}, ${fromLat}); true;`
+    );
+  }, [isMapReady, key, fromLocation?.lat, fromLocation?.lng]);
 
   useEffect(() => {
     if (!key || !isMapReady) return;

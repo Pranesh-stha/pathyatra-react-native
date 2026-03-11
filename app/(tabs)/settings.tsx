@@ -13,6 +13,8 @@ import {
 } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as Linking from 'expo-linking';
+import * as Haptics from 'expo-haptics';
 import { useTheme } from '@/context/ThemeContext';
 import { useLanguage, type Language } from '@/context/LanguageContext';
 import { useMapStyle } from '@/context/MapStyleContext';
@@ -35,8 +37,11 @@ const SettingsScreen = () => {
   const c = isDark ? darkColors : lightColors;
   const mapStyleSubtitle = isSatellite ? 'Satellite map view' : 'Default map view';
 
-  const handleNavigate = (screen: string) => {
-    console.log(`Navigating to ${screen}`);
+  const handleFeedback = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const subject = encodeURIComponent('PathYatra Feedback');
+    const body = encodeURIComponent('Hi PathYatra team,\n\n');
+    Linking.openURL(`mailto:shrestha8pranesh@gmail.com?subject=${subject}&body=${body}`);
   };
 
   const currentLangLabel = LANGUAGE_OPTIONS.find((o) => o.code === language)?.label ?? 'English';
@@ -184,7 +189,7 @@ const SettingsScreen = () => {
             iconBg="rgba(45, 212, 164, 0.2)"
             title={t.feedback}
             subtitle={t.feedbackSubtitle}
-            onPress={() => handleNavigate('Feedback')}
+            onPress={handleFeedback}
             style={styles.groupedItem}
           />
         </View>
