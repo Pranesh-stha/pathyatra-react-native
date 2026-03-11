@@ -14,6 +14,14 @@ const parseNumber = (value, fallback) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const parseCsvList = (value) => {
+  if (value == null || value === "") return [];
+  return String(value)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+};
+
 export const config = {
   port: parseNumber(process.env.PORT, 4000),
   supabaseUrl: process.env.SUPABASE_URL ?? "",
@@ -22,6 +30,12 @@ export const config = {
   maptilerDirectionsBaseUrl:
     process.env.MAPTILER_DIRECTIONS_BASE_URL ?? "https://api.maptiler.com/directions/v2",
   osrmBaseUrl: process.env.OSRM_BASE_URL ?? "https://router.project-osrm.org/route/v1",
+  preferredRouteIds: parseCsvList(process.env.PREFERRED_ROUTE_IDS),
+  preferredRouteBonusS: Math.max(0, parseNumber(process.env.PREFERRED_ROUTE_BONUS_S, 0)),
+  preferredRouteOrderStepS: Math.max(
+    0,
+    parseNumber(process.env.PREFERRED_ROUTE_ORDER_STEP_S, 120)
+  ),
 };
 
 export function assertServerConfig() {

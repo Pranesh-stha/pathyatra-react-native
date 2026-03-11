@@ -228,8 +228,29 @@ const MapBackground = forwardRef<MapBackgroundHandle, Props>(function MapBackgro
           },
         });
 
+        const arrowLayerId = "route-arrow-" + index;
+        map.addLayer({
+          id: arrowLayerId,
+          type: "symbol",
+          source: sourceId,
+          layout: {
+            "symbol-placement": "line",
+            "text-field": "▶",
+            "text-size": 13,
+            "symbol-spacing": 90,
+            "text-keep-upright": false,
+            "text-rotation-alignment": "map",
+          },
+          paint: {
+            "text-color": "#ffffff",
+            "text-halo-color": "rgba(0,0,0,0.35)",
+            "text-halo-width": 1.5,
+          },
+        });
+
         routeSourceIds.push(sourceId);
         routeLayerIds.push(layerId);
+        routeLayerIds.push(arrowLayerId);
       });
     };
 

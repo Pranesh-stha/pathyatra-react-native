@@ -19,6 +19,7 @@ import {
 
 const ROUTE_SHAPE_MAX_POINTS_PER_REQUEST = 12;
 const ROUTE_SHAPE_REQUEST_TIMEOUT_MS = 7000;
+const ROUTE_SHAPE_RETRY_BACKOFF_MS = 250;
 const ROUTE_SHAPE_CACHE_TTL_MS = 5 * 60 * 1000;
 const ROUTE_SHAPE_CACHE_MAX_ENTRIES = 400;
 const routeShapeCache = new Map();
@@ -37,6 +38,14 @@ function parseNumberParam({ raw, name, min = -Infinity, max = Infinity, fallback
   return value;
 }
 
+function parseCsvParam(raw) {
+  if (raw == null || raw === "") return [];
+  return String(raw)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 function parseLineGeoJson(value) {
   if (!value) return null;
   if (typeof value === "string") {
@@ -48,6 +57,8 @@ function parseLineGeoJson(value) {
   }
   return normalizeLineStringGeometry(value);
 }
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function buildStraightSegment(fromStation, toStation) {
   return {
@@ -85,20 +96,16 @@ function buildFallbackStraightGeometry(stops, stationById, platformById) {
   };
 }
 
-function buildStraightGeometryFromPoints(points) {
-  const coordinates = points
-    .map((point) => [Number(point.lon), Number(point.lat)])
-    .filter((pair) => Number.isFinite(pair[0]) && Number.isFinite(pair[1]));
-  if (coordinates.length < 2) return null;
-  return {
-    type: "LineString",
-    coordinates,
-  };
-}
-
 function buildWaypointChunksFromStops(sortedStopRows, stationById, platformById) {
   const stations = sortedStopRows
-    .map((row) => resolveRouteStopPoint(row, stationById, platformById))
+    .map((row) => {
+      const point = resolveRouteStopPoint(row, stationById, platformById);
+      if (!point) return null;
+      return {
+        ...point,
+        stopSequence: Number(row.stop_sequence),
+      };
+    })
     .filter(Boolean);
   if (stations.length < 2) return [];
 
@@ -135,26 +142,95 @@ function setCachedRouteShape(variantId, shape) {
   if (oldestKey) routeShapeCache.delete(oldestKey);
 }
 
-async function fetchRoadChunkLine(stationsChunk) {
-  let timeoutId = null;
-  try {
-    const controller = new AbortController();
-    timeoutId = setTimeout(() => controller.abort(), ROUTE_SHAPE_REQUEST_TIMEOUT_MS);
-    const points = stationsChunk.map((station) => ({
-      lat: Number(station.lat),
-      lon: Number(station.lon),
-    }));
-    const result = await fetchDirectionsPath({
-      profile: "driving",
-      points,
-      signal: controller.signal,
-    });
-    return normalizeLineStringGeometry(result.geometry);
-  } catch {
-    return null;
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
+function buildEdgeBySeq(edgeRows) {
+  const edgeBySeq = new Map();
+  for (const edge of edgeRows) {
+    edgeBySeq.set(`${Number(edge.from_stop_sequence)}:${Number(edge.to_stop_sequence)}`, edge);
   }
+  return edgeBySeq;
+}
+
+function getTrustedEdgeLine(edge) {
+  if (!edge) return null;
+  if (!(edge.source === "maptiler" || edge.source === "osrm")) return null;
+  const hasEdgeMetrics = (Number(edge.distance_m) || 0) > 0 && (Number(edge.duration_s) || 0) > 0;
+  if (!hasEdgeMetrics) return null;
+  return parseLineGeoJson(edge.line_geojson);
+}
+
+async function fetchRoadChunkLine(stationsChunk, { retries = 2 } = {}) {
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    let timeoutId = null;
+    try {
+      const controller = new AbortController();
+      timeoutId = setTimeout(() => controller.abort(), ROUTE_SHAPE_REQUEST_TIMEOUT_MS);
+      const points = stationsChunk.map((station) => ({
+        lat: Number(station.lat),
+        lon: Number(station.lon),
+      }));
+      const result = await fetchDirectionsPath({
+        profile: "driving",
+        points,
+        signal: controller.signal,
+      });
+      const geometry = normalizeLineStringGeometry(result.geometry);
+      if (geometry) return geometry;
+    } catch {
+      // try again below
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+    if (attempt < retries) {
+      await wait(ROUTE_SHAPE_RETRY_BACKOFF_MS * (attempt + 1));
+    }
+  }
+  return null;
+}
+
+async function buildRoadLineFromChunkLegs(stationsChunk, edgeBySeq) {
+  const legTasks = [];
+  for (let index = 0; index < stationsChunk.length - 1; index += 1) {
+    const from = stationsChunk[index];
+    const to = stationsChunk[index + 1];
+    legTasks.push(
+      (async () => {
+        const edge = edgeBySeq.get(`${Number(from.stopSequence)}:${Number(to.stopSequence)}`);
+        const trustedEdgeLine = getTrustedEdgeLine(edge);
+        if (trustedEdgeLine) {
+          return {
+            line: trustedEdgeLine,
+            usedStraightFallback: false,
+          };
+        }
+
+        const fetchedLegLine = await fetchRoadChunkLine([from, to], { retries: 1 });
+        if (fetchedLegLine) {
+          return {
+            line: fetchedLegLine,
+            usedStraightFallback: false,
+          };
+        }
+
+        return {
+          line: null,
+          usedStraightFallback: true,
+        };
+      })()
+    );
+  }
+
+  const legResults = await Promise.all(legTasks);
+  const hasMissingRoadLeg = legResults.some((entry) => entry.usedStraightFallback || !entry.line);
+  if (hasMissingRoadLeg) {
+    return {
+      line: null,
+      usedStraightFallback: true,
+    };
+  }
+  return {
+    line: mergeLineStrings(legResults.map((entry) => entry.line)),
+    usedStraightFallback: false,
+  };
 }
 
 function buildVariantShapeFromEdges({
@@ -167,10 +243,7 @@ function buildVariantShapeFromEdges({
   const edgeRows = (edgesByVariantId.get(variantId) ?? [])
     .slice()
     .sort((a, b) => Number(a.from_stop_sequence) - Number(b.from_stop_sequence));
-  const edgeBySeq = new Map();
-  for (const edge of edgeRows) {
-    edgeBySeq.set(`${Number(edge.from_stop_sequence)}:${Number(edge.to_stop_sequence)}`, edge);
-  }
+  const edgeBySeq = buildEdgeBySeq(edgeRows);
 
   const lines = [];
   for (let i = 0; i < sortedStopRows.length - 1; i += 1) {
@@ -184,14 +257,9 @@ function buildVariantShapeFromEdges({
     const toPoint = resolveRouteStopPoint(to, stationById, platformById);
     if (!fromPoint || !toPoint) continue;
 
-    const isTrustedEdgeSource =
-      edge && (edge.source === "maptiler" || edge.source === "osrm");
-    const parsedEdgeLine = edge ? parseLineGeoJson(edge.line_geojson) : null;
-    const hasEdgeMetrics =
-      edge && (Number(edge.distance_m) || 0) > 0 && (Number(edge.duration_s) || 0) > 0;
-
-    if (isTrustedEdgeSource && parsedEdgeLine && hasEdgeMetrics) {
-      lines.push(parsedEdgeLine);
+    const trustedEdgeLine = getTrustedEdgeLine(edge);
+    if (trustedEdgeLine) {
+      lines.push(trustedEdgeLine);
       continue;
     }
 
@@ -204,22 +272,64 @@ function buildVariantShapeFromEdges({
   );
 }
 
-async function buildSnappedShapeFromStops(sortedStopRows, stationById, platformById) {
+async function buildSnappedShapeFromStops(
+  sortedStopRows,
+  stationById,
+  platformById,
+  edgesByVariantId,
+  variantId
+) {
   const chunks = buildWaypointChunksFromStops(sortedStopRows, stationById, platformById);
+  const edgeBySeq = buildEdgeBySeq(edgesByVariantId.get(variantId) ?? []);
   if (chunks.length === 0) {
-    return buildFallbackStraightGeometry(sortedStopRows, stationById, platformById);
+    return {
+      shape: buildFallbackStraightGeometry(sortedStopRows, stationById, platformById),
+      usedStraightFallback: true,
+    };
   }
 
-  const lineTasks = chunks.map(async (chunk) => {
-    const roadLine = await fetchRoadChunkLine(chunk);
-    if (roadLine) return roadLine;
-    return buildStraightGeometryFromPoints(chunk);
+  const chunkTasks = chunks.map(async (chunk) => {
+    const roadLine = await fetchRoadChunkLine(chunk, { retries: 1 });
+    if (roadLine) {
+      return {
+        line: roadLine,
+        usedStraightFallback: false,
+      };
+    }
+
+    const legFallback = await buildRoadLineFromChunkLegs(chunk, edgeBySeq);
+    if (legFallback.line) {
+      return legFallback;
+    }
+
+    return {
+      line: null,
+      usedStraightFallback: true,
+    };
   });
-  const lines = (await Promise.all(lineTasks)).filter(Boolean);
-  return (
-    mergeLineStrings(lines) ??
-    buildFallbackStraightGeometry(sortedStopRows, stationById, platformById)
-  );
+
+  const chunkResults = await Promise.all(chunkTasks);
+  const hasFallback = chunkResults.some((entry) => entry.usedStraightFallback || !entry.line);
+  if (hasFallback) {
+    return {
+      shape: null,
+      usedStraightFallback: true,
+    };
+  }
+
+  const lines = chunkResults.map((entry) => entry.line).filter(Boolean);
+  const mergedLine = mergeLineStrings(lines);
+  if (!mergedLine) {
+    return {
+      shape: null,
+      usedStraightFallback: true,
+    };
+  }
+
+  return {
+    shape: mergedLine,
+    usedStraightFallback: false,
+  };
 }
 
 async function formatRouteResponse(
@@ -294,8 +404,17 @@ async function formatRouteResponse(
     if (selectedShapeVariantId === variant.id) {
       shape = getCachedRouteShape(variant.id);
       if (!shape) {
-        shape = await buildSnappedShapeFromStops(sortedStopRows, stationById, platformById);
-        setCachedRouteShape(variant.id, shape);
+        const snapped = await buildSnappedShapeFromStops(
+          sortedStopRows,
+          stationById,
+          platformById,
+          edgesByVariantId,
+          variant.id
+        );
+        shape = snapped.shape;
+        if (shape && !snapped.usedStraightFallback) {
+          setCachedRouteShape(variant.id, shape);
+        }
       }
     } else {
       shape = buildVariantShapeFromEdges({
@@ -486,12 +605,24 @@ async function main() {
         min: -180,
         max: 180,
       });
+      const preferredRouteIds = parseCsvParam(req.query.preferredRouteIds);
+      let preferredRouteBonusS;
+      if (req.query.preferredRouteBonusS != null && req.query.preferredRouteBonusS !== "") {
+        preferredRouteBonusS = parseNumberParam({
+          raw: req.query.preferredRouteBonusS,
+          name: "preferredRouteBonusS",
+          min: 0,
+          max: 24 * 60 * 60,
+        });
+      }
 
       const trip = await planSingleBusTrip({
         fromLat,
         fromLon,
         toLat,
         toLon,
+        preferredRouteIds,
+        preferredRouteBonusS,
       });
       res.json(trip);
     } catch (error) {

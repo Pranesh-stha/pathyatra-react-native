@@ -2,11 +2,17 @@ import { Ionicons } from "@expo/vector-icons";
 import type { BottomTabBarProps } from "@react-navigation/bottom-tabs";
 import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import {
+  APP_TAB_BAR_BORDER_TOP_WIDTH,
+  APP_TAB_BAR_ITEM_HEIGHT,
+  APP_TAB_BAR_PADDING_TOP,
+  getAppTabBarHeight,
+} from "../constants/tabBar";
+import { useTheme } from "../context/ThemeContext";
+import { useLanguage } from "../context/LanguageContext";
 
 const ICONS: Record<string, keyof typeof Ionicons.glyphMap> = {
   index: "home-outline",
-  explore: "compass-outline",
   routes: "map-outline",
   settings: "settings-outline",
 };
@@ -15,20 +21,42 @@ export default function CustomTabBar({
   state,
   descriptors,
   navigation,
+  insets,
 }: BottomTabBarProps) {
+  const { isDark } = useTheme();
+  const { t } = useLanguage();
+  const tabBarHeight = getAppTabBarHeight(insets.bottom);
+
+  const TAB_LABELS: Record<string, string> = {
+    index: t.home,
+    routes: t.routes,
+    settings: t.settings,
+  };
+  const contentBottomInset =
+    tabBarHeight -
+    APP_TAB_BAR_PADDING_TOP -
+    APP_TAB_BAR_ITEM_HEIGHT -
+    APP_TAB_BAR_BORDER_TOP_WIDTH;
+
   return (
-    <SafeAreaView
-      edges={["bottom"]}
-      style={styles.wrap}
-      pointerEvents="box-none"
-    >
-      <View style={styles.borderContainer}>
-        <View style={styles.bar}>
+    <View style={styles.wrap} pointerEvents="box-none">
+      <View style={[styles.borderContainer, { backgroundColor: isDark ? "#656565" : "rgba(0,0,0,0.12)" }]}>
+        <View
+          style={[
+            styles.bar,
+            {
+              height: tabBarHeight - APP_TAB_BAR_BORDER_TOP_WIDTH,
+              paddingBottom: contentBottomInset,
+              backgroundColor: isDark ? "rgba(18,18,18,0.98)" : "rgba(195,210,222,0.98)",
+              borderColor: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.10)",
+            },
+          ]}
+        >
           {state.routes.map((route, index) => {
             const isFocused = state.index === index;
             const { options } = descriptors[route.key];
 
-            const label =
+            const label = TAB_LABELS[route.name] ??
               options.tabBarLabel?.toString() ?? options.title ?? route.name;
 
             const onPress = () => {
@@ -54,7 +82,7 @@ export default function CustomTabBar({
                 <Ionicons
                   name={iconName}
                   size={22}
-                  color={isFocused ? "#10B981" : "rgba(255,255,255,0.75)"}
+                  color={isFocused ? "#10B981" : isDark ? "rgba(255,255,255,0.75)" : "rgba(0,0,0,0.45)"}
                   style={
                     isFocused
                       ? {
@@ -66,7 +94,11 @@ export default function CustomTabBar({
                       : undefined
                   }
                 />
-                <Text style={[styles.label, isFocused && styles.labelActive]}>
+                <Text style={[
+                  styles.label,
+                  { color: isDark ? "rgba(255,255,255,0.7)" : "rgba(0,0,0,0.45)" },
+                  isFocused && styles.labelActive,
+                ]}>
                   {label}
                 </Text>
               </Pressable>
@@ -74,23 +106,24 @@ export default function CustomTabBar({
           })}
         </View>
       </View>
-    </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   wrap: {
     position: "absolute",
-    left: -2.4,
-    right: -2.4,
-    bottom: -1,
+    left: 0,
+    right: 0,
+    bottom: 0,
     alignItems: "center",
   },
   bar: {
     width: "100%",
     flexDirection: "row",
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingTop: APP_TAB_BAR_PADDING_TOP,
+    paddingBottom: 12,
     borderTopLeftRadius: 35,
     borderTopRightRadius: 35,
     backgroundColor: "rgba(18,18,18,0.98)",

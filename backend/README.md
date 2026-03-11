@@ -17,6 +17,9 @@ Copy `.env.example` to `.env` and fill values:
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `MAPTILER_API_KEY`
 - `OSRM_BASE_URL` (optional fallback, default public OSRM)
+- `PREFERRED_ROUTE_IDS` (optional CSV route ids to prioritize, e.g. `r1,r2`)
+- `PREFERRED_ROUTE_BONUS_S` (optional score bonus in seconds for preferred routes, default `0`)
+- `PREFERRED_ROUTE_ORDER_STEP_S` (optional extra bonus by list order, default `120`)
 - `PORT` (optional, default `4000`)
 
 ## 3) Supabase SQL
@@ -65,3 +68,4 @@ Endpoints:
 - `GET /v1/stops/near?lat=<>&lon=<>&radiusM=<>&limit=<>`
 - `GET /v1/routes/:routeId`
 - `GET /v1/trips/plan?fromLat=<>&fromLon=<>&toLat=<>&toLon=<>`
+  - Optional: `preferredRouteIds=<id1,id2>` and `preferredRouteBonusS=<seconds>`

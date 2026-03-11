@@ -1,4 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { useTheme } from "@/context/ThemeContext";
+import { useLanguage } from "@/context/LanguageContext";
+import { useMapStyle } from "@/context/MapStyleContext";
 import {
   ActivityIndicator,
   Clipboard,
@@ -12,8 +15,9 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import RouteMap, { RouteMapCoordinate, RouteMapStop } from "@/components/RouteMap";
+import { getAppTabBarHeight } from "@/constants/tabBar";
 
 type RouteSummary = {
   id: string;
@@ -65,6 +69,41 @@ type SearchSuggestion = {
 };
 
 export default function RoutesScreen() {
+  const { isDark } = useTheme();
+  const { t } = useLanguage();
+  const { mapId } = useMapStyle();
+  const insets = useSafeAreaInsets();
+  const tabBarHeight = getAppTabBarHeight(insets.bottom);
+  const r = {
+    bg: isDark ? "#111315" : "#c8d4de",
+    cardBg: isDark ? "rgba(255,255,255,0.06)" : "#d5e0ea",
+    cardBorder: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.10)",
+    title: isDark ? "white" : "#1a1a1a",
+    meta: isDark ? "rgba(255,255,255,0.70)" : "#4a5568",
+    id: isDark ? "rgba(255,255,255,0.45)" : "rgba(0,0,0,0.38)",
+    inputBg: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)",
+    inputBorder: isDark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.10)",
+    inputText: isDark ? "white" : "#1a1a1a",
+    inputPlaceholder: isDark ? "rgba(255,255,255,0.48)" : "rgba(0,0,0,0.4)",
+    suggestionBg: isDark ? "rgba(20,20,20,0.92)" : "rgba(200,212,222,0.97)",
+    suggestionBorder: isDark ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.10)",
+    suggestionTitle: isDark ? "white" : "#1a1a1a",
+    suggestionSubtitle: isDark ? "rgba(255,255,255,0.65)" : "#4a5568",
+    suggestionDivider: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.09)",
+    suggestionStatus: isDark ? "rgba(255,255,255,0.72)" : "rgba(0,0,0,0.48)",
+    stateText: isDark ? "rgba(255,255,255,0.75)" : "rgba(0,0,0,0.52)",
+    backBtn: isDark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.10)",
+    backBtnText: isDark ? "white" : "#1a1a1a",
+    chipInactive: isDark ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.10)",
+    chipTextInactive: isDark ? "rgba(255,255,255,0.85)" : "rgba(0,0,0,0.62)",
+    coordCardBg: isDark ? "rgba(255,255,255,0.06)" : "#d5e0ea",
+    coordCardBorder: isDark ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.10)",
+    coordText: isDark ? "rgba(255,255,255,0.82)" : "rgba(0,0,0,0.65)",
+    stopRowBg: isDark ? "rgba(255,255,255,0.04)" : "#ccd8e2",
+    stopRowBorder: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.09)",
+    mapBorder: isDark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)",
+    hintText: isDark ? "rgba(255,255,255,0.65)" : "rgba(0,0,0,0.48)",
+  };
   const NEPAL_VIEWBOX_NOMINATIM = "80.058,30.447,88.201,26.347";
   const NEPAL_BBOX_MAPTILER = "80.058,26.347,88.201,30.447";
   const MAP_FOCUS_ZOOM = 15;
@@ -429,13 +468,9 @@ export default function RoutesScreen() {
       if (coords.length >= 2) return coords;
     }
 
-    return selectedVariantStops
-      .map((stop) => ({
-        lng: Number(stop.station.lon),
-        lat: Number(stop.station.lat),
-      }))
-      .filter((point) => Number.isFinite(point.lng) && Number.isFinite(point.lat));
-  }, [selectedVariant, selectedVariantStops]);
+    // Avoid misleading straight stop-to-stop lines when snapped geometry is unavailable.
+    return [];
+  }, [selectedVariant]);
 
   const mapStops: RouteMapStop[] = useMemo(
     () =>
@@ -447,6 +482,7 @@ export default function RoutesScreen() {
       })),
     [selectedVariantStops]
   );
+  const hasSnappedRouteShape = routeCoordinates.length >= 2;
 
   const handleDetailSearchSelect = (item: SearchSuggestion) => {
     Keyboard.dismiss();
@@ -465,7 +501,7 @@ export default function RoutesScreen() {
     const value = `lat: ${pressedLocation.lat.toFixed(8)}\nlon: ${pressedLocation.lng.toFixed(8)}`;
     Clipboard.setString(value);
     clearCopyFeedback();
-    setCopyFeedback("Copied");
+    setCopyFeedback(t.copied);
     copyFeedbackTimerRef.current = setTimeout(() => {
       setCopyFeedback(null);
       copyFeedbackTimerRef.current = null;
@@ -474,10 +510,10 @@ export default function RoutesScreen() {
 
   if (selectedRouteId && (routeDetail || routeDetailLoading || routeDetailError)) {
     return (
-      <SafeAreaView edges={["top"]} style={styles.container}>
+      <SafeAreaView edges={["top"]} style={[styles.container, { backgroundColor: r.bg }]}>
         <View style={styles.detailHeader}>
           <Pressable
-            style={styles.backButton}
+            style={[styles.backButton, { backgroundColor: r.backBtn }]}
             onPress={() => {
               setSelectedRouteId(null);
               setRouteDetail(null);
@@ -489,15 +525,15 @@ export default function RoutesScreen() {
               clearCopyFeedback();
             }}
           >
-            <Text style={styles.backButtonText}>Back</Text>
+            <Text style={[styles.backButtonText, { color: r.backBtnText }]}>{t.back}</Text>
           </Pressable>
-          <Text style={styles.detailTitle}>{routeDetail?.name ?? "Route Detail"}</Text>
+          <Text style={[styles.detailTitle, { color: r.title }]}>{routeDetail?.name ?? t.routeDetail}</Text>
         </View>
 
         {routeDetailLoading ? (
           <View style={styles.centerState}>
             <ActivityIndicator color="#1FAE66" />
-            <Text style={styles.stateText}>Loading route map...</Text>
+            <Text style={[styles.stateText, { color: r.stateText }]}>{t.loadingRouteMap}</Text>
           </View>
         ) : routeDetailError ? (
           <View style={styles.centerState}>
@@ -515,6 +551,7 @@ export default function RoutesScreen() {
                   key={variant.id}
                   style={[
                     styles.variantChip,
+                    { backgroundColor: r.chipInactive },
                     selectedVariantId === variant.id ? styles.variantChipActive : null,
                   ]}
                   onPress={() => {
@@ -532,6 +569,7 @@ export default function RoutesScreen() {
                   <Text
                     style={[
                       styles.variantChipText,
+                      { color: r.chipTextInactive },
                       selectedVariantId === variant.id ? styles.variantChipTextActive : null,
                     ]}
                   >
@@ -545,23 +583,23 @@ export default function RoutesScreen() {
               <TextInput
                 value={detailSearchQuery}
                 onChangeText={setDetailSearchQuery}
-                placeholder="Search area to pan map"
-                placeholderTextColor="rgba(255,255,255,0.48)"
-                style={styles.detailSearchInput}
+                placeholder={t.searchAreaPanMap}
+                placeholderTextColor={r.inputPlaceholder}
+                style={[styles.detailSearchInput, { backgroundColor: r.inputBg, borderColor: r.inputBorder, color: r.inputText }]}
                 returnKeyType="search"
                 onFocus={() => setDetailSearchFocused(true)}
                 onBlur={() => setDetailSearchFocused(false)}
               />
               {detailSearchFocused &&
               (detailSearchLoading || detailSearchError || detailSearchQuery.trim().length >= 2) ? (
-                <View style={styles.detailSuggestionsPanel}>
+                <View style={[styles.detailSuggestionsPanel, { backgroundColor: r.suggestionBg, borderColor: r.suggestionBorder }]}>
                   {detailSearchLoading ? (
-                    <Text style={styles.detailSuggestionStatus}>Searching...</Text>
+                    <Text style={[styles.detailSuggestionStatus, { color: r.suggestionStatus }]}>{t.searching}</Text>
                   ) : detailSearchError ? (
-                    <Text style={styles.detailSuggestionStatus}>{detailSearchError}</Text>
+                    <Text style={[styles.detailSuggestionStatus, { color: r.suggestionStatus }]}>{detailSearchError}</Text>
                   ) : detailSearchQuery.trim().length >= 2 &&
                     detailSearchSuggestions.length === 0 ? (
-                    <Text style={styles.detailSuggestionStatus}>No results found.</Text>
+                    <Text style={[styles.detailSuggestionStatus, { color: r.suggestionStatus }]}>{t.noResults}</Text>
                   ) : (
                     detailSearchSuggestions.map((item, index) => (
                       <Pressable
@@ -569,15 +607,15 @@ export default function RoutesScreen() {
                         onPress={() => handleDetailSearchSelect(item)}
                         style={({ pressed }) => [
                           styles.detailSuggestionItem,
-                          pressed ? { backgroundColor: "rgba(255,255,255,0.06)" } : null,
+                          pressed ? { backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)" } : null,
                         ]}
                       >
-                        <Text style={styles.detailSuggestionTitle}>{item.title}</Text>
+                        <Text style={[styles.detailSuggestionTitle, { color: r.suggestionTitle }]}>{item.title}</Text>
                         {item.subtitle ? (
-                          <Text style={styles.detailSuggestionSubtitle}>{item.subtitle}</Text>
+                          <Text style={[styles.detailSuggestionSubtitle, { color: r.suggestionSubtitle }]}>{item.subtitle}</Text>
                         ) : null}
                         {index < detailSearchSuggestions.length - 1 ? (
-                          <View style={styles.detailSuggestionDivider} />
+                          <View style={[styles.detailSuggestionDivider, { backgroundColor: r.suggestionDivider }]} />
                         ) : null}
                       </Pressable>
                     ))
@@ -586,10 +624,11 @@ export default function RoutesScreen() {
               ) : null}
             </View>
 
-            <View style={[styles.mapFrame, { height: routeMapHeight }]}>
+            <View style={[styles.mapFrame, { height: routeMapHeight, borderColor: r.mapBorder }]}>
               <RouteMap
                 routeCoordinates={routeCoordinates}
                 stops={mapStops}
+                mapId={mapId}
                 focusLocation={focusLocation}
                 focusZoom={MAP_FOCUS_ZOOM}
                 onMapPress={(location) => {
@@ -598,10 +637,15 @@ export default function RoutesScreen() {
                 }}
               />
             </View>
+            {!hasSnappedRouteShape && mapStops.length >= 2 ? (
+              <Text style={[styles.routeShapeHint, { color: r.hintText }]}>
+                {t.routeShapeUnavailable}
+              </Text>
+            ) : null}
 
-            <View style={styles.coordinateCard}>
+            <View style={[styles.coordinateCard, { backgroundColor: r.coordCardBg, borderColor: r.coordCardBorder }]}>
               <View style={styles.coordinateTitleRow}>
-                <Text style={styles.coordinateTitle}>Tapped Point</Text>
+                <Text style={[styles.coordinateTitle, { color: r.title }]}>{t.tappedPoint}</Text>
                 <Pressable
                   style={[
                     styles.copyButton,
@@ -610,13 +654,13 @@ export default function RoutesScreen() {
                   onPress={handleCopyPressedLocation}
                   disabled={!pressedLocation}
                 >
-                  <Text style={styles.copyButtonText}>Copy lon/lat</Text>
+                  <Text style={styles.copyButtonText}>{t.copyLonLat}</Text>
                 </Pressable>
               </View>
-              <Text style={styles.coordinateText}>
+              <Text style={[styles.coordinateText, { color: r.coordText }]}>
                 Lat: {pressedLocation ? String(pressedLocation.lat) : "-"}
               </Text>
-              <Text style={styles.coordinateText}>
+              <Text style={[styles.coordinateText, { color: r.coordText }]}>
                 Lon: {pressedLocation ? String(pressedLocation.lng) : "-"}
               </Text>
               {copyFeedback ? (
@@ -624,14 +668,14 @@ export default function RoutesScreen() {
               ) : null}
             </View>
 
-            <ScrollView style={styles.stopsList} contentContainerStyle={styles.stopsListContent}>
+            <ScrollView style={styles.stopsList} contentContainerStyle={[styles.stopsListContent, { paddingBottom: tabBarHeight + 8 }]}>
               {selectedVariantStops.map((stop) => (
-                <View key={`${selectedVariant.id}_${stop.stopSequence}`} style={styles.stopRow}>
-                  <Text style={styles.stopName}>
+                <View key={`${selectedVariant.id}_${stop.stopSequence}`} style={[styles.stopRow, { backgroundColor: r.stopRowBg, borderColor: r.stopRowBorder }]}>
+                  <Text style={[styles.stopName, { color: r.title }]}>
                     {stop.stopSequence}. {stop.station.name}
                   </Text>
-                  <Text style={styles.stopMeta}>Lat: {String(stop.station.lat)}</Text>
-                  <Text style={styles.stopMeta}>Lon: {String(stop.station.lon)}</Text>
+                  <Text style={[styles.stopMeta, { color: r.coordText }]}>Lat: {String(stop.station.lat)}</Text>
+                  <Text style={[styles.stopMeta, { color: r.coordText }]}>Lon: {String(stop.station.lon)}</Text>
                 </View>
               ))}
             </ScrollView>
@@ -642,51 +686,51 @@ export default function RoutesScreen() {
   }
 
   return (
-    <SafeAreaView edges={["top"]} style={styles.container}>
+    <SafeAreaView edges={["top"]} style={[styles.container, { backgroundColor: r.bg }]}>
       <View style={styles.listHeader}>
-        <Text style={styles.headerTitle}>All Bus Routes</Text>
+        <Text style={[styles.headerTitle, { color: r.title }]}>{t.allBusRoutes}</Text>
         <Pressable style={styles.reloadButton} onPress={loadRoutes}>
-          <Text style={styles.reloadButtonText}>Reload</Text>
+          <Text style={styles.reloadButtonText}>{t.reload}</Text>
         </Pressable>
       </View>
 
       <TextInput
         value={searchQuery}
         onChangeText={setSearchQuery}
-        placeholder="Search route name"
-        placeholderTextColor="rgba(255,255,255,0.48)"
-        style={styles.searchInput}
+        placeholder={t.searchRouteName}
+        placeholderTextColor={r.inputPlaceholder}
+        style={[styles.searchInput, { backgroundColor: r.inputBg, borderColor: r.inputBorder, color: r.inputText }]}
       />
 
       {routeListLoading ? (
         <View style={styles.centerState}>
           <ActivityIndicator color="#1FAE66" />
-          <Text style={styles.stateText}>Loading routes...</Text>
+          <Text style={[styles.stateText, { color: r.stateText }]}>{t.loadingRoutes}</Text>
         </View>
       ) : routeListError ? (
         <View style={styles.centerState}>
           <Text style={styles.errorText}>{routeListError}</Text>
         </View>
       ) : (
-        <ScrollView contentContainerStyle={styles.routeList}>
+        <ScrollView contentContainerStyle={[styles.routeList, { paddingBottom: tabBarHeight + 8 }]}>
           {filteredRoutes.map((route) => (
             <Pressable
               key={route.id}
-              style={({ pressed }) => [styles.routeCard, pressed ? styles.routeCardPressed : null]}
+              style={({ pressed }) => [styles.routeCard, { backgroundColor: r.cardBg, borderColor: r.cardBorder }, pressed ? styles.routeCardPressed : null]}
               onPress={() => {
                 setSelectedRouteId(route.id);
                 loadRouteDetail(route.id);
               }}
             >
-              <Text style={styles.routeName}>{route.name}</Text>
-              <Text style={styles.routeMeta}>
+              <Text style={[styles.routeName, { color: r.title }]}>{route.name}</Text>
+              <Text style={[styles.routeMeta, { color: r.meta }]}>
                 {route.directionality} {route.isLoop ? " | loop" : ""}
               </Text>
-              <Text style={styles.routeId}>{route.id}</Text>
+              <Text style={[styles.routeId, { color: r.id }]}>{route.id}</Text>
             </Pressable>
           ))}
           {filteredRoutes.length === 0 ? (
-            <Text style={styles.stateText}>No matching routes found.</Text>
+            <Text style={[styles.stateText, { color: r.stateText }]}>{t.noMatchingRoutes}</Text>
           ) : null}
         </ScrollView>
       )}
@@ -890,6 +934,12 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.12)",
+  },
+  routeShapeHint: {
+    marginTop: 8,
+    marginHorizontal: 18,
+    color: "rgba(255,255,255,0.65)",
+    fontSize: 12,
   },
   coordinateCard: {
     marginTop: 10,

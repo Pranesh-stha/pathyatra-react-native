@@ -1,18 +1,35 @@
-import React, { useEffect, useRef, useState } from "react";
-import { View, Text, StyleSheet, Pressable, TextInput, Keyboard, Platform } from "react-native";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Animated,
+  Keyboard,
+  PanResponder,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import Svg, { Circle, Line, Path } from "react-native-svg";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Location from "expo-location";
 import MapBackground, {
   MapBackgroundHandle,
   MapPolylineSegment,
 } from "../../components/MapBackground";
+import { getAppTabBarHeight } from "../../constants/tabBar";
+import { useTheme } from "../../context/ThemeContext";
+import { useLanguage } from "../../context/LanguageContext";
+import { useMapStyle } from "../../context/MapStyleContext";
 
 export default function HomeScreen() {
   const USER_FOCUS_ZOOM = 15;
+  const BOTTOM_SHEET_PEEK_HEIGHT = 84;
   const NEPAL_VIEWBOX_NOMINATIM = "80.058,30.447,88.201,26.347";
   const NEPAL_BBOX_MAPTILER = "80.058,26.347,88.201,30.447";
   const BACKEND_BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+  const insets = useSafeAreaInsets();
+  const tabBarHeight = getAppTabBarHeight(insets.bottom);
   const mapRef = useRef<MapBackgroundHandle>(null);
   const maptilerKey = process.env.EXPO_PUBLIC_MAPTILER_KEY;
   const searchInputRef = useRef<TextInput>(null);
@@ -23,6 +40,21 @@ export default function HomeScreen() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const searchLookupId = useRef(0);
   const searchAbortRef = useRef<AbortController | null>(null);
+  const fromSearchInputRef = useRef<TextInput>(null);
+  const [fromSearchQuery, setFromSearchQuery] = useState("");
+  const [isFromSearchFocused, setIsFromSearchFocused] = useState(false);
+  const [fromSearchSuggestions, setFromSearchSuggestions] = useState<SearchSuggestion[]>([]);
+  const [fromSearchLoading, setFromSearchLoading] = useState(false);
+  const [fromSearchError, setFromSearchError] = useState<string | null>(null);
+  const fromSearchLookupId = useRef(0);
+  const fromSearchAbortRef = useRef<AbortController | null>(null);
+  const [showFromSelector, setShowFromSelector] = useState(false);
+  const [customFromLocation, setCustomFromLocation] = useState<{
+    lng: number;
+    lat: number;
+  } | null>(null);
+  const [fromPlaceTitle, setFromPlaceTitle] = useState<string>("Your location");
+  const [fromPlaceSubtitle, setFromPlaceSubtitle] = useState<string | null>(null);
   const [initialCenter, setInitialCenter] = useState<{
     lng: number;
     lat: number;
@@ -47,8 +79,55 @@ export default function HomeScreen() {
   const [tripPlanError, setTripPlanError] = useState<string | null>(null);
   const [tripPlan, setTripPlan] = useState<TripItinerary | null>(null);
   const [tripSegments, setTripSegments] = useState<MapPolylineSegment[]>([]);
+  const [sheetHeight, setSheetHeight] = useState(0);
+  const [isSheetCollapsed, setIsSheetCollapsed] = useState(false);
+  const sheetTranslateY = useRef(new Animated.Value(0)).current;
+  const sheetTranslateYValueRef = useRef(0);
+  const sheetDragStartRef = useRef(0);
+  const maxSheetTranslateRef = useRef(0);
   const proximityLat = userCenter?.lat;
   const proximityLng = userCenter?.lng;
+  const effectiveFromLocation = customFromLocation ?? userCenter;
+  const maxSheetTranslate = Math.max(0, sheetHeight - BOTTOM_SHEET_PEEK_HEIGHT);
+  const bottomCardBottomOffset = tabBarHeight + 8;
+  const { isDark } = useTheme();
+  const { t } = useLanguage();
+  const { mapId } = useMapStyle();
+  const tc = {
+    searchBarBg: isDark ? "rgba(20,20,20,0.82)" : "rgba(195,205,215,0.92)",
+    searchBarBorder: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.10)",
+    inputText: isDark ? "white" : "#1a1a1a",
+    inputPlaceholder: isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.4)",
+    suggestionsBg: isDark ? "rgba(20,20,20,0.9)" : "rgba(200,210,220,0.97)",
+    suggestionsBorder: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.10)",
+    suggestionTitle: isDark ? "white" : "#1a1a1a",
+    suggestionSubtitle: isDark ? "rgba(255,255,255,0.65)" : "#4a5568",
+    suggestionDivider: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.09)",
+    suggestionStatus: isDark ? "rgba(255,255,255,0.7)" : "rgba(0,0,0,0.5)",
+    cardBg: isDark ? "rgba(18,18,18,0.94)" : "rgba(195,207,218,0.95)",
+    cardBorder: isDark ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.10)",
+    cardTitle: isDark ? "white" : "#1a1a1a",
+    cardText: isDark ? "rgba(255,255,255,0.75)" : "rgba(0,0,0,0.62)",
+    sheetHandle: isDark ? "rgba(255,255,255,0.34)" : "rgba(0,0,0,0.22)",
+    fromSelectorBg: isDark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.07)",
+    fromSelectorBorder: isDark ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.10)",
+    fromSelectorLabel: isDark ? "rgba(255,255,255,0.70)" : "rgba(0,0,0,0.5)",
+    fromSelectorValue: isDark ? "white" : "#1a1a1a",
+    fromSelectorSubtitle: isDark ? "rgba(255,255,255,0.68)" : "#4a5568",
+    fromSearchBg: isDark ? "rgba(20,20,20,0.78)" : "rgba(0,0,0,0.08)",
+    fromSearchBorder: isDark ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.10)",
+    mapControlsBg: isDark ? "rgba(20,20,20,0.70)" : "rgba(195,207,218,0.92)",
+    mapControlsBorder: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.10)",
+    tripCardBg: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.07)",
+    tripCardBorder: isDark ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.10)",
+    tripTitle: isDark ? "white" : "#1a1a1a",
+    tripValue: isDark ? "white" : "#1a1a1a",
+    tripLabel: isDark ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.48)",
+    tripMeta: isDark ? "rgba(255,255,255,0.65)" : "rgba(0,0,0,0.52)",
+    tripDot: isDark ? "rgba(255,255,255,0.4)" : "rgba(0,0,0,0.28)",
+    tripDivider: isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.09)",
+    clearIconColor: isDark ? "rgba(255,255,255,0.7)" : "rgba(0,0,0,0.45)",
+  };
 
   const resolveBackendBaseUrl = () => {
     if (!BACKEND_BASE_URL) return null;
@@ -59,6 +138,116 @@ export default function HomeScreen() {
       .replace("://localhost", "://10.0.2.2")
       .replace("://127.0.0.1", "://10.0.2.2");
   };
+
+  const clampSheetTranslate = useCallback((value: number, min: number, max: number) => {
+    return Math.min(max, Math.max(min, value));
+  }, []);
+
+  useEffect(() => {
+    const listenerId = sheetTranslateY.addListener(({ value }) => {
+      sheetTranslateYValueRef.current = value;
+    });
+    return () => {
+      sheetTranslateY.removeListener(listenerId);
+    };
+  }, [sheetTranslateY]);
+
+  useEffect(() => {
+    maxSheetTranslateRef.current = maxSheetTranslate;
+    if (!selectedLocation) {
+      sheetTranslateY.stopAnimation();
+      sheetTranslateY.setValue(0);
+      sheetTranslateYValueRef.current = 0;
+      setIsSheetCollapsed(false);
+      return;
+    }
+    if (isSheetCollapsed) {
+      sheetTranslateY.setValue(maxSheetTranslate);
+      sheetTranslateYValueRef.current = maxSheetTranslate;
+      return;
+    }
+    const boundedCurrent = clampSheetTranslate(
+      sheetTranslateYValueRef.current,
+      0,
+      maxSheetTranslate
+    );
+    if (boundedCurrent !== sheetTranslateYValueRef.current) {
+      sheetTranslateY.setValue(boundedCurrent);
+      sheetTranslateYValueRef.current = boundedCurrent;
+    }
+  }, [
+    clampSheetTranslate,
+    isSheetCollapsed,
+    maxSheetTranslate,
+    selectedLocation,
+    sheetTranslateY,
+  ]);
+
+  const animateSheetTo = useCallback(
+    (toValue: number) => {
+      const boundedTarget = clampSheetTranslate(toValue, 0, maxSheetTranslateRef.current);
+      Animated.spring(sheetTranslateY, {
+        toValue: boundedTarget,
+        useNativeDriver: true,
+        damping: 24,
+        stiffness: 240,
+        mass: 0.9,
+      }).start(({ finished }) => {
+        if (finished) {
+          setIsSheetCollapsed(boundedTarget > 0);
+        }
+      });
+    },
+    [clampSheetTranslate, sheetTranslateY]
+  );
+
+  const toggleSheetPosition = useCallback(() => {
+    const maxTranslate = maxSheetTranslateRef.current;
+    if (maxTranslate <= 0) return;
+    const isCurrentlyCollapsed = sheetTranslateYValueRef.current > maxTranslate * 0.5;
+    animateSheetTo(isCurrentlyCollapsed ? 0 : maxTranslate);
+  }, [animateSheetTo]);
+
+  const sheetPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_event, gestureState) => {
+          return Math.abs(gestureState.dy) > 4 && maxSheetTranslateRef.current > 0;
+        },
+        onPanResponderGrant: () => {
+          sheetTranslateY.stopAnimation((value) => {
+            sheetDragStartRef.current = value;
+          });
+        },
+        onPanResponderMove: (_event, gestureState) => {
+          const maxTranslate = maxSheetTranslateRef.current;
+          const next = clampSheetTranslate(
+            sheetDragStartRef.current + gestureState.dy,
+            0,
+            maxTranslate
+          );
+          sheetTranslateY.setValue(next);
+        },
+        onPanResponderRelease: (_event, gestureState) => {
+          const maxTranslate = maxSheetTranslateRef.current;
+          if (maxTranslate <= 0) {
+            animateSheetTo(0);
+            return;
+          }
+          const current = clampSheetTranslate(sheetTranslateYValueRef.current, 0, maxTranslate);
+          const shouldCollapse =
+            gestureState.vy > 0.8 ||
+            (gestureState.vy >= 0 && current > maxTranslate * 0.35);
+          animateSheetTo(shouldCollapse ? maxTranslate : 0);
+        },
+        onPanResponderTerminate: () => {
+          const maxTranslate = maxSheetTranslateRef.current;
+          const current = clampSheetTranslate(sheetTranslateYValueRef.current, 0, maxTranslate);
+          animateSheetTo(current > maxTranslate * 0.5 ? maxTranslate : 0);
+        },
+      }),
+    [animateSheetTo, clampSheetTranslate, sheetTranslateY]
+  );
 
   useEffect(() => {
     const query = searchQuery.trim();
@@ -263,6 +452,213 @@ export default function HomeScreen() {
   }, [isSearchFocused, maptilerKey, proximityLat, proximityLng, searchQuery]);
 
   useEffect(() => {
+    const query = fromSearchQuery.trim();
+    if (!isFromSearchFocused || query.length < 2) {
+      setFromSearchSuggestions([]);
+      setFromSearchLoading(false);
+      setFromSearchError(null);
+      fromSearchAbortRef.current?.abort();
+      return;
+    }
+
+    const requestId = (fromSearchLookupId.current += 1);
+    setFromSearchLoading(true);
+    setFromSearchError(null);
+
+    const controller = new AbortController();
+    fromSearchAbortRef.current?.abort();
+    fromSearchAbortRef.current = controller;
+
+    const timeoutId = setTimeout(async () => {
+      try {
+        const mapSuggestions = (items: SearchSuggestion[]) =>
+          items.filter(Boolean).slice(0, 5);
+
+        const fetchMapTilerSuggestions = async (preferNepal: boolean, q: string) => {
+          if (!maptilerKey) return [];
+          const params = new URLSearchParams({
+            key: maptilerKey,
+            limit: "5",
+            language: "en",
+            types:
+              "poi,address,place,locality,neighbourhood,road,postal_code,region,subregion,county,municipality,country",
+          });
+          if (preferNepal) {
+            params.set("country", "np");
+            params.set("bbox", NEPAL_BBOX_MAPTILER);
+          }
+          if (Number.isFinite(proximityLat) && Number.isFinite(proximityLng)) {
+            params.set("proximity", `${proximityLng},${proximityLat}`);
+          }
+
+          const url = `https://api.maptiler.com/geocoding/${encodeURIComponent(
+            q
+          )}.json?${params.toString()}`;
+          const response = await fetch(url, {
+            signal: controller.signal,
+            headers: {
+              Accept: "application/json",
+            },
+          });
+
+          if (!response.ok) {
+            throw new Error(`Search failed (${response.status})`);
+          }
+
+          const data = await response.json();
+          const features = Array.isArray(data?.features) ? data.features : [];
+          return features
+            .map((feature: any) => {
+              const center = Array.isArray(feature?.center)
+                ? feature.center
+                : Array.isArray(feature?.geometry?.coordinates)
+                  ? feature.geometry.coordinates
+                  : null;
+              if (!center || center.length < 2) return null;
+              const [lng, lat] = center;
+              if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+              const title = feature?.text || feature?.place_name?.split(",")[0] || "Result";
+              const subtitle = feature?.place_name || null;
+              return {
+                id: String(feature?.id ?? `${lat},${lng}`),
+                title,
+                subtitle,
+                lat,
+                lng,
+              } as SearchSuggestion;
+            })
+            .filter(Boolean)
+            .slice(0, 5);
+        };
+
+        const fetchNominatimSuggestions = async (preferNepal: boolean, q: string) => {
+          const params = new URLSearchParams({
+            format: "jsonv2",
+            addressdetails: "1",
+            limit: "5",
+            q,
+          });
+
+          if (preferNepal) {
+            params.set("countrycodes", "np");
+            params.set("viewbox", NEPAL_VIEWBOX_NOMINATIM);
+            params.set("bounded", "0");
+          }
+
+          const url = `https://nominatim.openstreetmap.org/search?${params.toString()}`;
+          const response = await fetch(url, {
+            signal: controller.signal,
+            headers: {
+              Accept: "application/json",
+              "Accept-Language": "en",
+              "User-Agent": "RouteApp/1.0",
+            },
+          });
+
+          if (!response.ok) {
+            throw new Error(`Search failed (${response.status})`);
+          }
+
+          const data = await response.json();
+          return Array.isArray(data)
+            ? data
+                .map((item: any) => {
+                  const lat = Number(item?.lat);
+                  const lng = Number(item?.lon);
+                  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+                  const rawName = item?.name || "";
+                  const displayName = item?.display_name || "";
+                  const title = rawName || displayName.split(",")[0] || "Result";
+                  const subtitle =
+                    displayName && displayName !== title ? displayName : null;
+                  return {
+                    id: String(item?.place_id ?? `${lat},${lng}`),
+                    title,
+                    subtitle,
+                    lat,
+                    lng,
+                  } as SearchSuggestion;
+                })
+                .filter(Boolean)
+                .slice(0, 5)
+            : [];
+        };
+
+        const buildVariants = (q: string) => {
+          const variants: string[] = [q];
+          const expandedHospital = q.replace(/\bhos(p)?$/i, "hospital");
+          if (expandedHospital !== q) variants.push(expandedHospital);
+          if (q.includes(" ")) {
+            const trimmed = q.split(" ").slice(0, -1).join(" ").trim();
+            if (trimmed && trimmed !== q) variants.push(trimmed);
+          }
+          return Array.from(new Set(variants));
+        };
+
+        const variants = buildVariants(query);
+        let suggestions: SearchSuggestion[] = [];
+
+        for (const variant of variants) {
+          suggestions = mapSuggestions(
+            maptilerKey
+              ? await fetchMapTilerSuggestions(true, variant)
+              : await fetchNominatimSuggestions(true, variant)
+          );
+          if (fromSearchLookupId.current !== requestId) return;
+          if (suggestions.length > 0) break;
+
+          suggestions = mapSuggestions(
+            maptilerKey
+              ? await fetchMapTilerSuggestions(false, variant)
+              : await fetchNominatimSuggestions(false, variant)
+          );
+          if (fromSearchLookupId.current !== requestId) return;
+          if (suggestions.length > 0) break;
+        }
+
+        if (suggestions.length === 0 && maptilerKey) {
+          for (const variant of variants) {
+            suggestions = mapSuggestions(
+              await fetchNominatimSuggestions(true, variant)
+            );
+            if (fromSearchLookupId.current !== requestId) return;
+            if (suggestions.length > 0) break;
+
+            suggestions = mapSuggestions(
+              await fetchNominatimSuggestions(false, variant)
+            );
+            if (fromSearchLookupId.current !== requestId) return;
+            if (suggestions.length > 0) break;
+          }
+        }
+
+        setFromSearchSuggestions(suggestions);
+      } catch (err: any) {
+        if (err?.name === "AbortError") return;
+        if (fromSearchLookupId.current !== requestId) return;
+        setFromSearchError("Unable to fetch suggestions.");
+        setFromSearchSuggestions([]);
+      } finally {
+        if (fromSearchLookupId.current === requestId) {
+          setFromSearchLoading(false);
+        }
+      }
+    }, 350);
+
+    return () => {
+      clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [fromSearchQuery, isFromSearchFocused, maptilerKey, proximityLat, proximityLng]);
+
+  useEffect(() => {
+    return () => {
+      searchAbortRef.current?.abort();
+      fromSearchAbortRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
     let isActive = true;
     let subscription: Location.LocationSubscription | null = null;
 
@@ -383,11 +779,11 @@ export default function HomeScreen() {
 
   const requestTripPlan = async () => {
     if (!selectedLocation) {
-      setTripPlanError("Select a destination first.");
+      setTripPlanError(t.selectDestination);
       return;
     }
-    if (!userCenter) {
-      setTripPlanError("Current location unavailable.");
+    if (!effectiveFromLocation) {
+      setTripPlanError(t.fromUnavailable);
       return;
     }
     if (!BACKEND_BASE_URL) {
@@ -401,8 +797,8 @@ export default function HomeScreen() {
       return;
     }
     const params = new URLSearchParams({
-      fromLat: String(userCenter.lat),
-      fromLon: String(userCenter.lng),
+      fromLat: String(effectiveFromLocation.lat),
+      fromLon: String(effectiveFromLocation.lng),
       toLat: String(selectedLocation.lat),
       toLon: String(selectedLocation.lng),
     });
@@ -496,9 +892,54 @@ export default function HomeScreen() {
     setSelectedPlaceSubtitle(item.subtitle);
     setSelectedPlaceError(null);
     setSelectedPlaceLoading(false);
+    setIsSheetCollapsed(false);
+    animateSheetTo(0);
     clearTripPlan();
 
     mapRef.current?.panToLocation(item.lng, item.lat, USER_FOCUS_ZOOM);
+  };
+
+  const handleSelectFromSuggestion = (item: SearchSuggestion) => {
+    Keyboard.dismiss();
+    fromSearchInputRef.current?.blur();
+    setFromSearchQuery(item.title);
+    setFromSearchSuggestions([]);
+    setFromSearchLoading(false);
+    setFromSearchError(null);
+    setCustomFromLocation({ lng: item.lng, lat: item.lat });
+    setFromPlaceTitle(item.title);
+    setFromPlaceSubtitle(item.subtitle);
+    clearTripPlan();
+    animateSheetTo(0);
+    setIsSheetCollapsed(false);
+    mapRef.current?.panToLocation(item.lng, item.lat, USER_FOCUS_ZOOM);
+  };
+
+  const handleUseYourLocationAsFrom = () => {
+    setCustomFromLocation(null);
+    setFromPlaceTitle(t.yourLocation);
+    setFromPlaceSubtitle(null);
+    setFromSearchQuery("");
+    setFromSearchSuggestions([]);
+    setFromSearchLoading(false);
+    setFromSearchError(null);
+    clearTripPlan();
+    animateSheetTo(0);
+    setIsSheetCollapsed(false);
+    if (userCenter) {
+      mapRef.current?.panToUser(userCenter.lng, userCenter.lat, USER_FOCUS_ZOOM);
+    }
+  };
+
+  const handleDirectionsPress = () => {
+    setShowFromSelector(true);
+    animateSheetTo(0);
+    setIsSheetCollapsed(false);
+    if (effectiveFromLocation) {
+      requestTripPlan();
+    } else {
+      setTripPlanError(t.chooseFromLocation);
+    }
   };
 
   return (
@@ -508,6 +949,7 @@ export default function HomeScreen() {
         <MapBackground
           ref={mapRef}
           initialCenter={initialCenter ?? undefined}
+          mapId={mapId}
           userLocation={userCenter ? { lng: userCenter.lng, lat: userCenter.lat } : undefined}
           selectedLocation={selectedLocation}
           routeSegments={tripSegments}
@@ -516,6 +958,8 @@ export default function HomeScreen() {
             setSearchSuggestions([]);
             setSearchError(null);
             setSearchLoading(false);
+            setIsSheetCollapsed(false);
+            animateSheetTo(0);
             clearTripPlan();
             lookupPlaceName(location);
           }}
@@ -525,29 +969,42 @@ export default function HomeScreen() {
       {/* Your UI overlay */}
       <SafeAreaView edges={["top"]} style={styles.overlay} pointerEvents="box-none">
         <View style={styles.searchWrap} pointerEvents="auto">
-          <View style={styles.searchBar}>
+          <View style={[styles.searchBar, { backgroundColor: tc.searchBarBg, borderColor: tc.searchBarBorder }]}>
             <SearchIcon color="#26c485" />
             <TextInput
               ref={searchInputRef}
               value={searchQuery}
               onChangeText={setSearchQuery}
-              placeholder="Search places, hotels, landmarks"
-              placeholderTextColor="rgba(255,255,255,0.55)"
-              style={styles.searchInput}
+              placeholder={t.searchPlaceholder}
+              placeholderTextColor={tc.inputPlaceholder}
+              style={[styles.searchInput, { color: tc.inputText }]}
               returnKeyType="search"
               onFocus={() => setIsSearchFocused(true)}
               onBlur={() => setIsSearchFocused(false)}
             />
+            {searchQuery.length > 0 && (
+              <Pressable
+                onPress={() => {
+                  setSearchQuery("");
+                  setSearchSuggestions([]);
+                  setSearchError(null);
+                }}
+                style={styles.clearButton}
+                accessibilityLabel="Clear search"
+              >
+                <ClearIcon color={tc.clearIconColor} />
+              </Pressable>
+            )}
           </View>
           {isSearchFocused &&
           (searchLoading || searchError || searchQuery.trim().length >= 2) ? (
-            <View style={styles.suggestionsPanel}>
+            <View style={[styles.suggestionsPanel, { backgroundColor: tc.suggestionsBg, borderColor: tc.suggestionsBorder }]}>
               {searchLoading ? (
-                <Text style={styles.suggestionStatus}>Searching...</Text>
+                <Text style={[styles.suggestionStatus, { color: tc.suggestionStatus }]}>{t.searching}</Text>
               ) : searchError ? (
-                <Text style={styles.suggestionStatus}>{searchError}</Text>
+                <Text style={[styles.suggestionStatus, { color: tc.suggestionStatus }]}>{searchError}</Text>
               ) : searchQuery.trim().length >= 2 && searchSuggestions.length === 0 ? (
-                <Text style={styles.suggestionStatus}>No results found.</Text>
+                <Text style={[styles.suggestionStatus, { color: tc.suggestionStatus }]}>{t.noResults}</Text>
               ) : (
                 searchSuggestions.map((item, index) => (
                   <Pressable
@@ -555,15 +1012,15 @@ export default function HomeScreen() {
                     onPress={() => handleSelectSuggestion(item)}
                     style={({ pressed }) => [
                       styles.suggestionItem,
-                      pressed ? { backgroundColor: "rgba(255,255,255,0.05)" } : null,
+                      pressed ? { backgroundColor: isDark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.04)" } : null,
                     ]}
                   >
-                    <Text style={styles.suggestionTitle}>{item.title}</Text>
+                    <Text style={[styles.suggestionTitle, { color: tc.suggestionTitle }]}>{item.title}</Text>
                     {item.subtitle ? (
-                      <Text style={styles.suggestionSubtitle}>{item.subtitle}</Text>
+                      <Text style={[styles.suggestionSubtitle, { color: tc.suggestionSubtitle }]}>{item.subtitle}</Text>
                     ) : null}
                     {index < searchSuggestions.length - 1 ? (
-                      <View style={styles.suggestionDivider} />
+                      <View style={[styles.suggestionDivider, { backgroundColor: tc.suggestionDivider }]} />
                     ) : null}
                   </Pressable>
                 ))
@@ -577,19 +1034,19 @@ export default function HomeScreen() {
       </SafeAreaView>
 
       <View style={styles.mapControls} pointerEvents="box-none">
-        <View style={styles.mapControlsFrame} pointerEvents="auto">
+        <View style={[styles.mapControlsFrame, { backgroundColor: tc.mapControlsBg, borderColor: tc.mapControlsBorder }]} pointerEvents="auto">
           <MapControlButton
             accessibilityLabel="Zoom in"
             onPress={() => mapRef.current?.zoomIn()}
-            icon={<ZoomInIcon color="#ffffff" />}
+            icon={<ZoomInIcon color={isDark ? "#ffffff" : "#1a1a1a"} />}
           />
-          <View style={styles.mapControlDivider} />
+          <View style={[styles.mapControlDivider, { backgroundColor: tc.mapControlsBorder }]} />
           <MapControlButton
             accessibilityLabel="Zoom out"
             onPress={() => mapRef.current?.zoomOut()}
-            icon={<ZoomOutIcon color="#ffffff" />}
+            icon={<ZoomOutIcon color={isDark ? "#ffffff" : "#1a1a1a"} />}
           />
-          <View style={styles.mapControlDivider} />
+          <View style={[styles.mapControlDivider, { backgroundColor: tc.mapControlsBorder }]} />
           <MapControlButton
             accessibilityLabel="Pan to my location"
             onPress={() => {
@@ -608,10 +1065,42 @@ export default function HomeScreen() {
       </View>
 
       {selectedLocation ? (
-        <SafeAreaView edges={["bottom"]} style={styles.bottomCardContainer} pointerEvents="box-none">
-          <View style={styles.bottomCard} pointerEvents="auto">
+        <SafeAreaView
+          edges={[]}
+          style={[styles.bottomCardContainer, { bottom: bottomCardBottomOffset }]}
+          pointerEvents="box-none"
+        >
+          <Animated.View
+            style={[
+              styles.bottomCard,
+              {
+                transform: [{ translateY: sheetTranslateY }],
+                backgroundColor: tc.cardBg,
+                borderColor: tc.cardBorder,
+              },
+            ]}
+            pointerEvents="auto"
+            onLayout={(event) => {
+              const nextHeight = Math.round(event.nativeEvent.layout.height);
+              if (nextHeight > 0 && nextHeight !== sheetHeight) {
+                setSheetHeight(nextHeight);
+              }
+            }}
+            {...sheetPanResponder.panHandlers}
+          >
+            <Pressable
+              style={styles.bottomSheetHandleTouch}
+              onPress={toggleSheetPosition}
+              accessibilityRole="button"
+              accessibilityLabel={
+                isSheetCollapsed ? "Expand directions card" : "Collapse directions card"
+              }
+            >
+              <View style={[styles.bottomSheetHandle, { backgroundColor: tc.sheetHandle }]} />
+            </Pressable>
+
             <View style={styles.bottomCardHeader}>
-              <Text style={styles.bottomCardTitle}>
+              <Text style={[styles.bottomCardTitle, { color: tc.cardTitle }]}>
                 {selectedPlaceTitle ?? "Selected Place"}
               </Text>
               <Pressable
@@ -621,37 +1110,111 @@ export default function HomeScreen() {
                   setSelectedPlaceSubtitle(null);
                   setSelectedPlaceError(null);
                   setSelectedPlaceLoading(false);
+                  setShowFromSelector(false);
+                  setIsFromSearchFocused(false);
+                  setFromSearchQuery("");
+                  setFromSearchSuggestions([]);
+                  setFromSearchLoading(false);
+                  setFromSearchError(null);
                   clearTripPlan();
                 }}
                 accessibilityRole="button"
                 accessibilityLabel="Close selected place card"
                 style={styles.closeButton}
               >
-                <Text style={styles.closeButtonText}>x</Text>
+                <CloseIcon color="rgba(255,255,255,0.85)" />
               </Pressable>
             </View>
             {selectedPlaceLoading ? (
-              <Text style={styles.bottomCardText}>Looking up place...</Text>
+              <Text style={[styles.bottomCardText, { color: tc.cardText }]}>{t.lookingUpPlace}</Text>
             ) : selectedPlaceError ? (
-              <Text style={styles.bottomCardText}>{selectedPlaceError}</Text>
+              <Text style={[styles.bottomCardText, { color: tc.cardText }]}>{selectedPlaceError}</Text>
             ) : selectedPlaceSubtitle ? (
-              <Text style={styles.bottomCardText}>{selectedPlaceSubtitle}</Text>
+              <Text style={[styles.bottomCardText, { color: tc.cardText }]}>{selectedPlaceSubtitle}</Text>
             ) : null}
-            <Text style={styles.bottomCardText}>
+            <Text style={[styles.bottomCardText, { color: tc.cardText }]}>
               Latitude: {selectedLocation.lat.toFixed(6)}
             </Text>
-            <Text style={styles.bottomCardText}>
+            <Text style={[styles.bottomCardText, { color: tc.cardText }]}>
               Longitude: {selectedLocation.lng.toFixed(6)}
             </Text>
 
+            {showFromSelector ? (
+              <View style={[styles.fromSelectorSection, { backgroundColor: tc.fromSelectorBg, borderColor: tc.fromSelectorBorder }]}>
+                <Text style={[styles.fromSelectorTitle, { color: tc.fromSelectorLabel }]}>{t.from}</Text>
+                <Text style={[styles.fromSelectorValue, { color: tc.fromSelectorValue }]}>{fromPlaceTitle}</Text>
+                {fromPlaceSubtitle ? (
+                  <Text style={[styles.fromSelectorSubtitle, { color: tc.fromSelectorSubtitle }]}>{fromPlaceSubtitle}</Text>
+                ) : null}
+
+                <View style={[styles.fromSearchBar, { backgroundColor: tc.fromSearchBg, borderColor: tc.fromSearchBorder }]}>
+                  <SearchIcon color="#26c485" />
+                  <TextInput
+                    ref={fromSearchInputRef}
+                    value={fromSearchQuery}
+                    onChangeText={setFromSearchQuery}
+                    placeholder={t.searchStartLocation}
+                    placeholderTextColor={tc.inputPlaceholder}
+                    style={[styles.fromSearchInput, { color: tc.inputText }]}
+                    returnKeyType="search"
+                    onFocus={() => setIsFromSearchFocused(true)}
+                    onBlur={() => setIsFromSearchFocused(false)}
+                  />
+                </View>
+
+                <Pressable
+                  onPress={handleUseYourLocationAsFrom}
+                  style={({ pressed }) => [
+                    styles.yourLocationButton,
+                    pressed ? { transform: [{ scale: 0.99 }] } : null,
+                  ]}
+                >
+                  <Text style={styles.yourLocationButtonText}>{t.yourLocation}</Text>
+                </Pressable>
+
+                {isFromSearchFocused &&
+                (fromSearchLoading || fromSearchError || fromSearchQuery.trim().length >= 2) ? (
+                  <View style={[styles.fromSuggestionsPanel, { backgroundColor: tc.suggestionsBg, borderColor: tc.suggestionsBorder }]}>
+                    {fromSearchLoading ? (
+                      <Text style={[styles.suggestionStatus, { color: tc.suggestionStatus }]}>{t.searching}</Text>
+                    ) : fromSearchError ? (
+                      <Text style={[styles.suggestionStatus, { color: tc.suggestionStatus }]}>{fromSearchError}</Text>
+                    ) : fromSearchQuery.trim().length >= 2 &&
+                      fromSearchSuggestions.length === 0 ? (
+                      <Text style={[styles.suggestionStatus, { color: tc.suggestionStatus }]}>{t.noResults}</Text>
+                    ) : (
+                      fromSearchSuggestions.map((item, index) => (
+                        <Pressable
+                          key={item.id}
+                          onPress={() => handleSelectFromSuggestion(item)}
+                          style={({ pressed }) => [
+                            styles.suggestionItem,
+                            pressed ? { backgroundColor: isDark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.04)" } : null,
+                          ]}
+                        >
+                          <Text style={[styles.suggestionTitle, { color: tc.suggestionTitle }]}>{item.title}</Text>
+                          {item.subtitle ? (
+                            <Text style={[styles.suggestionSubtitle, { color: tc.suggestionSubtitle }]}>{item.subtitle}</Text>
+                          ) : null}
+                          {index < fromSearchSuggestions.length - 1 ? (
+                            <View style={[styles.suggestionDivider, { backgroundColor: tc.suggestionDivider }]} />
+                          ) : null}
+                        </Pressable>
+                      ))
+                    )}
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
+
             <View style={styles.bottomCardActions}>
               <Pressable
-                onPress={requestTripPlan}
-                disabled={tripPlanLoading || !userCenter}
+                onPress={handleDirectionsPress}
+                disabled={tripPlanLoading}
                 style={({ pressed }) => [
                   styles.directionButton,
-                  tripPlanLoading || !userCenter ? styles.directionButtonDisabled : null,
-                  pressed && !(tripPlanLoading || !userCenter)
+                  tripPlanLoading ? styles.directionButtonDisabled : null,
+                  pressed && !tripPlanLoading
                     ? { transform: [{ scale: 0.98 }] }
                     : null,
                 ]}
@@ -659,7 +1222,7 @@ export default function HomeScreen() {
                 accessibilityLabel="Get bus directions"
               >
                 <Text style={styles.directionButtonText}>
-                  {tripPlanLoading ? "Planning..." : "Directions"}
+                  {tripPlanLoading ? t.planning : t.directions}
                 </Text>
               </Pressable>
             </View>
@@ -669,23 +1232,43 @@ export default function HomeScreen() {
             ) : null}
 
             {tripPlan ? (
-              <View style={styles.tripSummaryCard}>
-                <Text style={styles.tripSummaryTitle}>
-                  {tripPlan.route?.name ?? "Bus Route"}
-                </Text>
-                <Text style={styles.tripSummaryText}>
-                  Board: {tripPlan.boardingPlatform?.name ?? tripPlan.boardingStation.name}
-                </Text>
-                <Text style={styles.tripSummaryText}>
-                  Get off: {tripPlan.alightingPlatform?.name ?? tripPlan.alightingStation.name}
-                </Text>
-                <Text style={styles.tripSummaryText}>
-                  ETA {formatDuration(tripPlan.totals.totalDurationS)} | Distance{" "}
-                  {formatDistance(tripPlan.totals.totalDistanceM)}
-                </Text>
+              <View style={[styles.tripSummaryCard, { backgroundColor: tc.tripCardBg, borderColor: tc.tripCardBorder }]}>
+                <View style={styles.tripSummaryHeader}>
+                  <Text style={styles.tripSummaryRouteLabel}>🚌</Text>
+                  <Text style={[styles.tripSummaryTitle, { color: tc.tripTitle }]}>
+                    {tripPlan.route?.name ?? t.busRoute}
+                  </Text>
+                </View>
+                <View style={styles.tripSummaryRow}>
+                  <Text style={[styles.tripSummaryDot, { color: tc.tripDot }]}>●</Text>
+                  <View>
+                    <Text style={[styles.tripSummaryLabel, { color: tc.tripLabel }]}>{t.boardAt}</Text>
+                    <Text style={[styles.tripSummaryValue, { color: tc.tripValue }]}>
+                      {tripPlan.boardingPlatform?.name ?? tripPlan.boardingStation.name}
+                    </Text>
+                  </View>
+                </View>
+                <View style={styles.tripSummaryRow}>
+                  <Text style={[styles.tripSummaryDot, { color: "#1FAE66" }]}>●</Text>
+                  <View>
+                    <Text style={[styles.tripSummaryLabel, { color: tc.tripLabel }]}>{t.getOffAt}</Text>
+                    <Text style={[styles.tripSummaryValue, { color: tc.tripValue }]}>
+                      {tripPlan.alightingPlatform?.name ?? tripPlan.alightingStation.name}
+                    </Text>
+                  </View>
+                </View>
+                <View style={[styles.tripSummaryFooter, { borderTopColor: tc.tripDivider }]}>
+                  <Text style={[styles.tripSummaryMeta, { color: tc.tripMeta }]}>
+                    🕐 {formatDuration(tripPlan.totals.totalDurationS)}
+                  </Text>
+                  <Text style={[styles.tripSummaryMetaDivider, { color: tc.tripDot }]}>·</Text>
+                  <Text style={[styles.tripSummaryMeta, { color: tc.tripMeta }]}>
+                    📍 {formatDistance(tripPlan.totals.totalDistanceM)}
+                  </Text>
+                </View>
               </View>
             ) : null}
-          </View>
+          </Animated.View>
         </SafeAreaView>
       ) : null}
     </View>
@@ -759,12 +1342,31 @@ const styles = StyleSheet.create({
     position: "absolute",
     left: 16,
     right: 16,
-    bottom: 80,
   },
   bottomCard: {
-    padding: 14,
-    borderRadius: 16,
-    backgroundColor: "rgba(20,20,20,0.85)",
+    padding: 16,
+    borderRadius: 20,
+    backgroundColor: "rgba(18,18,18,0.94)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 24,
+    elevation: 12,
+  },
+  bottomSheetHandleTouch: {
+    height: 20,
+    marginTop: -4,
+    marginBottom: 6,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  bottomSheetHandle: {
+    width: 42,
+    height: 5,
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.34)",
   },
   bottomCardHeader: {
     flexDirection: "row",
@@ -774,12 +1376,82 @@ const styles = StyleSheet.create({
   },
   bottomCardTitle: {
     color: "white",
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: "700",
+    flex: 1,
+    marginRight: 8,
   },
   bottomCardText: {
-    color: "rgba(255,255,255,0.85)",
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 13,
+    marginTop: 3,
+  },
+  fromSelectorSection: {
+    marginTop: 12,
+    borderRadius: 14,
+    padding: 12,
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  fromSelectorTitle: {
+    color: "rgba(255,255,255,0.70)",
+    fontSize: 11,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  fromSelectorValue: {
     marginTop: 2,
+    color: "white",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  fromSelectorSubtitle: {
+    marginTop: 2,
+    color: "rgba(255,255,255,0.68)",
+    fontSize: 12,
+  },
+  fromSearchBar: {
+    marginTop: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    height: 42,
+    borderRadius: 12,
+    backgroundColor: "rgba(20,20,20,0.78)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.10)",
+  },
+  fromSearchInput: {
+    flex: 1,
+    color: "white",
+    fontSize: 14,
+    paddingVertical: 0,
+  },
+  yourLocationButton: {
+    marginTop: 8,
+    height: 36,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(31,174,102,0.22)",
+    borderWidth: 1,
+    borderColor: "rgba(31,174,102,0.50)",
+  },
+  yourLocationButtonText: {
+    color: "#7bf2bc",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  fromSuggestionsPanel: {
+    marginTop: 8,
+    borderRadius: 12,
+    overflow: "hidden",
+    backgroundColor: "rgba(20,20,20,0.92)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
   },
   bottomCardActions: {
     marginTop: 10,
@@ -807,34 +1479,84 @@ const styles = StyleSheet.create({
   tripSummaryCard: {
     marginTop: 10,
     borderRadius: 12,
-    padding: 10,
+    padding: 14,
     backgroundColor: "rgba(255,255,255,0.06)",
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
+    borderColor: "rgba(255,255,255,0.10)",
+    borderLeftWidth: 3,
+    borderLeftColor: "#1FAE66",
+  },
+  tripSummaryHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 10,
+  },
+  tripSummaryRouteLabel: {
+    fontSize: 16,
   },
   tripSummaryTitle: {
     color: "white",
     fontSize: 14,
     fontWeight: "700",
-    marginBottom: 4,
+    flex: 1,
+  },
+  tripSummaryRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    marginBottom: 6,
+  },
+  tripSummaryDot: {
+    color: "rgba(255,255,255,0.4)",
+    fontSize: 10,
+    marginTop: 3,
+  },
+  tripSummaryLabel: {
+    color: "rgba(255,255,255,0.55)",
+    fontSize: 10,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.3,
+  },
+  tripSummaryValue: {
+    color: "white",
+    fontSize: 13,
+    fontWeight: "600",
+    marginTop: 1,
+  },
+  tripSummaryFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.08)",
+  },
+  tripSummaryMeta: {
+    color: "rgba(255,255,255,0.65)",
+    fontSize: 12,
+  },
+  tripSummaryMetaDivider: {
+    color: "rgba(255,255,255,0.3)",
+    fontSize: 14,
   },
   tripSummaryText: {
     color: "rgba(255,255,255,0.82)",
     fontSize: 12,
     marginTop: 2,
   },
+  clearButton: {
+    padding: 4,
+  },
   closeButton: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
     backgroundColor: "rgba(255,255,255,0.12)",
     alignItems: "center",
     justifyContent: "center",
-  },
-  closeButtonText: {
-    color: "white",
-    fontSize: 18,
-    lineHeight: 18,
   },
   mapControls: {
     position: "absolute",
@@ -1006,6 +1728,25 @@ function SearchIcon({ color }: { color: string }) {
     <Svg width={20} height={20} viewBox="0 0 24 24" fill="none">
       <Circle cx="11" cy="11" r="6.5" stroke={color} strokeWidth="2" />
       <Line x1="20" y1="20" x2="16.5" y2="16.5" stroke={color} strokeWidth="2" />
+    </Svg>
+  );
+}
+
+function ClearIcon({ color }: { color: string }) {
+  return (
+    <Svg width={18} height={18} viewBox="0 0 24 24" fill="none">
+      <Circle cx="12" cy="12" r="10" fill="rgba(255,255,255,0.15)" />
+      <Line x1="8" y1="8" x2="16" y2="16" stroke={color} strokeWidth="2" strokeLinecap="round" />
+      <Line x1="16" y1="8" x2="8" y2="16" stroke={color} strokeWidth="2" strokeLinecap="round" />
+    </Svg>
+  );
+}
+
+function CloseIcon({ color }: { color: string }) {
+  return (
+    <Svg width={14} height={14} viewBox="0 0 24 24" fill="none">
+      <Line x1="4" y1="4" x2="20" y2="20" stroke={color} strokeWidth="2.5" strokeLinecap="round" />
+      <Line x1="20" y1="4" x2="4" y2="20" stroke={color} strokeWidth="2.5" strokeLinecap="round" />
     </Svg>
   );
 }

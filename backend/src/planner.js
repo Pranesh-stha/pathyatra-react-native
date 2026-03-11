@@ -1,3 +1,4 @@
+import { config } from "./config.js";
 import { HttpError } from "./errors.js";
 import {
   getAllRouteVariants,
@@ -36,6 +37,61 @@ const BUS_FALLBACK_MIN_DURATION_S = 8;
 const WALK_FALLBACK_MIN_DISTANCE_M = 5;
 const WALK_FALLBACK_MIN_DURATION_S = 5;
 const DIRECTIONS_CALL_TIMEOUT_MS = 6000;
+
+function normalizeRouteIdList(routeIds) {
+  if (!Array.isArray(routeIds)) return [];
+  const seen = new Set();
+  const normalized = [];
+  for (const routeId of routeIds) {
+    const value = String(routeId || "").trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    normalized.push(value);
+  }
+  return normalized;
+}
+
+function buildRoutePriorityConfig({
+  preferredRouteIds,
+  preferredRouteBonusS,
+  preferredRouteOrderStepS,
+} = {}) {
+  const routeIds =
+    Array.isArray(preferredRouteIds) && preferredRouteIds.length > 0
+      ? preferredRouteIds
+      : config.preferredRouteIds;
+  const normalizedRouteIds = normalizeRouteIdList(routeIds);
+  const routeIdSet = new Set(normalizedRouteIds);
+  const rankByRouteId = new Map(normalizedRouteIds.map((routeId, index) => [routeId, index]));
+  const parsedBonus = Number(preferredRouteBonusS);
+  const bonusS = Number.isFinite(parsedBonus)
+    ? Math.max(0, parsedBonus)
+    : Number(config.preferredRouteBonusS) || 0;
+  const parsedOrderStep = Number(preferredRouteOrderStepS);
+  const orderStepS = Number.isFinite(parsedOrderStep)
+    ? Math.max(0, parsedOrderStep)
+    : Number(config.preferredRouteOrderStepS) || 0;
+
+  return {
+    routeIdSet,
+    orderedRouteIds: normalizedRouteIds,
+    rankByRouteId,
+    bonusS,
+    orderStepS,
+  };
+}
+
+function getRoutePriorityBonusS(routeId, routePriority) {
+  if (!routePriority) return 0;
+  if (routePriority.bonusS <= 0 && routePriority.orderStepS <= 0) return 0;
+  const normalizedRouteId = String(routeId);
+  if (!routePriority.routeIdSet.has(normalizedRouteId)) return 0;
+
+  const totalPreferred = routePriority.rankByRouteId.size;
+  const rank = routePriority.rankByRouteId.get(normalizedRouteId) ?? totalPreferred - 1;
+  const positionalBonusS = Math.max(0, (totalPreferred - 1 - rank) * routePriority.orderStepS);
+  return routePriority.bonusS + positionalBonusS;
+}
 
 function buildNoRouteResponse(code, message) {
   return {
@@ -83,6 +139,58 @@ function buildVariantStationIndex(variantStops) {
   }
 
   return variantMap;
+}
+
+function buildVariantSequenceOrder(variantStops) {
+  const sequencesByVariant = new Map();
+  for (const row of variantStops) {
+    const variantId = row.variant_id;
+    if (!sequencesByVariant.has(variantId)) {
+      sequencesByVariant.set(variantId, new Set());
+    }
+    sequencesByVariant.get(variantId).add(Number(row.stop_sequence));
+  }
+
+  const ordered = new Map();
+  for (const [variantId, seqSet] of sequencesByVariant.entries()) {
+    const values = Array.from(seqSet.values())
+      .filter((seq) => Number.isFinite(seq))
+      .sort((a, b) => a - b);
+    if (values.length >= 2) {
+      ordered.set(variantId, values);
+    }
+  }
+  return ordered;
+}
+
+function buildLegSequencePairs(option, variantSequenceOrder) {
+  const sequenceOrder = variantSequenceOrder.get(option.variantId);
+  if (!sequenceOrder || sequenceOrder.length < 2) return null;
+
+  const indexBySeq = new Map(sequenceOrder.map((seq, index) => [seq, index]));
+  const originIndex = indexBySeq.get(Number(option.originSeq));
+  const destinationIndex = indexBySeq.get(Number(option.destinationSeq));
+  if (!Number.isInteger(originIndex) || !Number.isInteger(destinationIndex)) return null;
+  if (originIndex === destinationIndex) return null;
+  if (!option.wrapAround && originIndex >= destinationIndex) return null;
+
+  const pairs = [];
+  let currentIndex = originIndex;
+  let guard = 0;
+  while (currentIndex !== destinationIndex) {
+    const nextIndex = (currentIndex + 1) % sequenceOrder.length;
+    if (!option.wrapAround && nextIndex <= currentIndex) {
+      return null;
+    }
+    const fromSeq = sequenceOrder[currentIndex];
+    const toSeq = sequenceOrder[nextIndex];
+    pairs.push({ fromSeq, toSeq });
+    currentIndex = nextIndex;
+    guard += 1;
+    if (guard > sequenceOrder.length + 1) return null;
+  }
+
+  return pairs.length > 0 ? pairs : null;
 }
 
 function buildEdgeIndex(edges) {
@@ -143,11 +251,14 @@ function isEdgeDistanceReasonable(distanceM, fromPoint, toPoint) {
 function getUsableEdge({
   variantEdges,
   seq,
+  nextSeq,
   fromPoint,
   toPoint,
   requireGeometry = false,
 }) {
-  const edge = variantEdges?.get(`${seq}:${seq + 1}`);
+  const resolvedNextSeq =
+    Number.isFinite(Number(nextSeq)) ? Number(nextSeq) : Number(seq) + 1;
+  const edge = variantEdges?.get(`${Number(seq)}:${resolvedNextSeq}`);
   if (!edge) return null;
   if (!isEdgeAlignedWithPoints(edge, fromPoint, toPoint)) return null;
 
@@ -225,23 +336,27 @@ function buildApproxBusMetrics({
   option,
   edgeIndex,
   variantStopSequenceToPoint,
+  variantSequenceOrder,
 }) {
   const variantEdges = edgeIndex.get(option.variantId);
   const sequenceToPoint = variantStopSequenceToPoint.get(option.variantId);
   if (!sequenceToPoint) return null;
+  const legPairs = buildLegSequencePairs(option, variantSequenceOrder);
+  if (!legPairs) return null;
 
   let distanceM = 0;
   let durationS = 0;
-  for (let seq = option.originSeq; seq < option.destinationSeq; seq += 1) {
-    const fromPoint = sequenceToPoint.get(seq);
-    const toPoint = sequenceToPoint.get(seq + 1);
+  for (const legPair of legPairs) {
+    const fromPoint = sequenceToPoint.get(legPair.fromSeq);
+    const toPoint = sequenceToPoint.get(legPair.toSeq);
     if (!fromPoint || !toPoint) {
       return null;
     }
 
     const usableEdge = getUsableEdge({
       variantEdges,
-      seq,
+      seq: legPair.fromSeq,
+      nextSeq: legPair.toSeq,
       fromPoint,
       toPoint,
       requireGeometry: false,
@@ -311,23 +426,27 @@ async function buildBusSegment({
   option,
   edgeIndex,
   variantStopSequenceToPoint,
+  variantSequenceOrder,
 }) {
   const variantEdges = edgeIndex.get(option.variantId);
   const sequenceToPoint = variantStopSequenceToPoint.get(option.variantId);
   if (!sequenceToPoint) return null;
+  const legPairs = buildLegSequencePairs(option, variantSequenceOrder);
+  if (!legPairs) return null;
 
   let distanceM = 0;
   let durationS = 0;
   const lineStrings = [];
 
-  for (let seq = option.originSeq; seq < option.destinationSeq; seq += 1) {
-    const fromPoint = sequenceToPoint.get(seq);
-    const toPoint = sequenceToPoint.get(seq + 1);
+  for (const legPair of legPairs) {
+    const fromPoint = sequenceToPoint.get(legPair.fromSeq);
+    const toPoint = sequenceToPoint.get(legPair.toSeq);
     if (!fromPoint || !toPoint) return null;
 
     const usableEdge = getUsableEdge({
       variantEdges,
-      seq,
+      seq: legPair.fromSeq,
+      nextSeq: legPair.toSeq,
       fromPoint,
       toPoint,
       requireGeometry: true,
@@ -389,6 +508,9 @@ function buildCandidateOptions({
   variantStationIndex,
   edgeIndex,
   variantStopSequenceToPoint,
+  variantSequenceOrder,
+  routeIsLoopById,
+  routePriority,
 }) {
   const candidateOptions = [];
 
@@ -406,40 +528,54 @@ function buildCandidateOptions({
 
         for (const originSeq of originSequences) {
           for (const destinationSeq of destinationSequences) {
-            if (originSeq >= destinationSeq) continue;
+            const isLoopRoute = Boolean(routeIsLoopById.get(variant.route_id));
+            const traversalModes =
+              originSeq < destinationSeq
+                ? [false]
+                : isLoopRoute && originSeq !== destinationSeq
+                  ? [true]
+                  : [];
 
-            const approxBusMetrics = buildApproxBusMetrics({
-              option: {
+            for (const wrapAround of traversalModes) {
+              const approxBusMetrics = buildApproxBusMetrics({
+                option: {
+                  variantId: variant.id,
+                  originSeq,
+                  destinationSeq,
+                  wrapAround,
+                },
+                edgeIndex,
+                variantStopSequenceToPoint,
+                variantSequenceOrder,
+              });
+              if (!approxBusMetrics) continue;
+
+              const approxWalkDurationS =
+                (Number(originStation.distanceM) + Number(destinationStation.distanceM)) /
+                WALKING_SPEED_MPS;
+              const approxWalkDistanceM =
+                (Number(originStation.distanceM) || 0) +
+                (Number(destinationStation.distanceM) || 0);
+              const approxScoreS =
+                approxWalkDurationS + approxBusMetrics.durationS + WAIT_PENALTY_S;
+              const priorityBonusS = getRoutePriorityBonusS(variant.route_id, routePriority);
+
+              candidateOptions.push({
                 variantId: variant.id,
+                routeId: variant.route_id,
+                direction: variant.direction,
+                originStation,
+                destinationStation,
                 originSeq,
                 destinationSeq,
-              },
-              edgeIndex,
-              variantStopSequenceToPoint,
-            });
-            if (!approxBusMetrics) continue;
-
-            const approxWalkDurationS =
-              (Number(originStation.distanceM) + Number(destinationStation.distanceM)) /
-              WALKING_SPEED_MPS;
-            const approxWalkDistanceM =
-              (Number(originStation.distanceM) || 0) +
-              (Number(destinationStation.distanceM) || 0);
-            const approxScoreS =
-              approxWalkDurationS + approxBusMetrics.durationS + WAIT_PENALTY_S;
-
-            candidateOptions.push({
-              variantId: variant.id,
-              routeId: variant.route_id,
-              direction: variant.direction,
-              originStation,
-              destinationStation,
-              originSeq,
-              destinationSeq,
-              approxWalkDistanceM,
-              approxBusDurationS: approxBusMetrics.durationS,
-              approxScoreS,
-            });
+                wrapAround,
+                approxWalkDistanceM,
+                approxBusDurationS: approxBusMetrics.durationS,
+                approxScoreS,
+                priorityBonusS,
+                priorityAdjustedApproxScoreS: approxScoreS - priorityBonusS,
+              });
+            }
           }
         }
       }
@@ -456,6 +592,9 @@ function findCandidatesByNearestStopExpansion({
   variantStationIndex,
   edgeIndex,
   variantStopSequenceToPoint,
+  variantSequenceOrder,
+  routeIsLoopById,
+  routePriority,
 }) {
   const maxDepth = Math.max(originCandidates.length, destinationCandidates.length);
 
@@ -474,6 +613,9 @@ function findCandidatesByNearestStopExpansion({
       variantStationIndex,
       edgeIndex,
       variantStopSequenceToPoint,
+      variantSequenceOrder,
+      routeIsLoopById,
+      routePriority,
     });
     if (candidateOptions.length > 0) {
       return candidateOptions;
@@ -484,13 +626,18 @@ function findCandidatesByNearestStopExpansion({
 }
 
 function buildEvaluationShortlist(candidateOptions) {
+  const getApproxSortScore = (option) =>
+    Number.isFinite(Number(option.priorityAdjustedApproxScoreS))
+      ? Number(option.priorityAdjustedApproxScoreS)
+      : Number(option.approxScoreS) || Number.POSITIVE_INFINITY;
+
   if (candidateOptions.length <= MAX_EXACT_WALK_EVALUATIONS) {
     return candidateOptions;
   }
 
   const byApproxScore = candidateOptions
     .slice()
-    .sort((a, b) => a.approxScoreS - b.approxScoreS)
+    .sort((a, b) => getApproxSortScore(a) - getApproxSortScore(b))
     .slice(0, MAX_EXACT_WALK_EVALUATIONS);
 
   const nearestByVariantAndOrigin = new Map();
@@ -509,16 +656,20 @@ function buildEvaluationShortlist(candidateOptions) {
 
   const merged = new Map();
   for (const option of byApproxScore) {
-    const key = `${option.variantId}:${option.originSeq}:${option.destinationSeq}`;
+    const key = `${option.variantId}:${option.originSeq}:${option.destinationSeq}:${Number(
+      option.wrapAround ? 1 : 0
+    )}`;
     merged.set(key, option);
   }
   for (const option of nearestByVariantAndOrigin.values()) {
-    const key = `${option.variantId}:${option.originSeq}:${option.destinationSeq}`;
+    const key = `${option.variantId}:${option.originSeq}:${option.destinationSeq}:${Number(
+      option.wrapAround ? 1 : 0
+    )}`;
     merged.set(key, option);
   }
 
   return Array.from(merged.values())
-    .sort((a, b) => a.approxScoreS - b.approxScoreS)
+    .sort((a, b) => getApproxSortScore(a) - getApproxSortScore(b))
     .slice(0, MAX_SHORTLIST_SIZE);
 }
 
@@ -526,6 +677,7 @@ function buildFastCandidateRanking({
   shortlist,
   edgeIndex,
   variantStopSequenceToPoint,
+  variantSequenceOrder,
   fromLat,
   fromLon,
   toLat,
@@ -544,9 +696,11 @@ function buildFastCandidateRanking({
         variantId: option.variantId,
         originSeq: option.originSeq,
         destinationSeq: option.destinationSeq,
+        wrapAround: Boolean(option.wrapAround),
       },
       edgeIndex,
       variantStopSequenceToPoint,
+      variantSequenceOrder,
     });
     if (!approxBusMetrics) continue;
 
@@ -574,14 +728,16 @@ function buildFastCandidateRanking({
       alightingPoint,
       approxTotalWalkDistanceM,
       approxTotalDurationS,
+      adjustedApproxTotalScoreS:
+        approxTotalDurationS - (Number(option.priorityBonusS) || 0),
       approxFinalWalkDurationS: walkToDestinationApprox.durationS,
       approxWalkDistanceM: walkToBoardingApprox.distanceM + walkToDestinationApprox.distanceM,
     });
   }
 
   ranked.sort((a, b) => {
-    if (a.approxTotalDurationS !== b.approxTotalDurationS) {
-      return a.approxTotalDurationS - b.approxTotalDurationS;
+    if (a.adjustedApproxTotalScoreS !== b.adjustedApproxTotalScoreS) {
+      return a.adjustedApproxTotalScoreS - b.adjustedApproxTotalScoreS;
     }
     if (a.approxFinalWalkDurationS !== b.approxFinalWalkDurationS) {
       return a.approxFinalWalkDurationS - b.approxFinalWalkDurationS;
@@ -592,7 +748,62 @@ function buildFastCandidateRanking({
   return ranked;
 }
 
-export async function planSingleBusTrip({ fromLat, fromLon, toLat, toLon }) {
+function buildVariantSearchOrder(variants, routePriority) {
+  const preferredRouteIds = routePriority?.routeIdSet;
+  if (!preferredRouteIds || preferredRouteIds.size === 0) {
+    return [variants];
+  }
+
+  const orderedRouteIds = Array.isArray(routePriority?.orderedRouteIds)
+    ? routePriority.orderedRouteIds
+    : [];
+  const variantsByRouteId = new Map();
+  for (const variant of variants) {
+    const routeId = String(variant.route_id);
+    if (!preferredRouteIds.has(routeId)) continue;
+    if (!variantsByRouteId.has(routeId)) {
+      variantsByRouteId.set(routeId, []);
+    }
+    variantsByRouteId.get(routeId).push(variant);
+  }
+
+  const preferredVariantPools = [];
+  for (const routeId of orderedRouteIds) {
+    const pool = variantsByRouteId.get(routeId) ?? [];
+    if (pool.length === 0) continue;
+    preferredVariantPools.push(
+      pool.slice().sort((left, right) => String(left.id).localeCompare(String(right.id)))
+    );
+  }
+
+  if (preferredVariantPools.length === 0) {
+    return [variants];
+  }
+
+  const hasNonPreferred = variants.some(
+    (variant) => !preferredRouteIds.has(String(variant.route_id))
+  );
+
+  if (!hasNonPreferred) {
+    return preferredVariantPools;
+  }
+
+  // Fallback to all routes only if no preferred route can serve the trip.
+  return [...preferredVariantPools, variants];
+}
+
+export async function planSingleBusTrip({
+  fromLat,
+  fromLon,
+  toLat,
+  toLon,
+  preferredRouteIds,
+  preferredRouteBonusS,
+}) {
+  const routePriority = buildRoutePriorityConfig({
+    preferredRouteIds,
+    preferredRouteBonusS,
+  });
   const [initialOriginCandidates, initialDestinationCandidates, variants] = await Promise.all([
     getNearbyStations({
       lat: fromLat,
@@ -657,9 +868,12 @@ export async function planSingleBusTrip({ fromLat, fromLon, toLat, toLon }) {
   }
 
   const routeById = new Map(routes.map((route) => [route.id, route]));
+  const routeIsLoopById = new Map(routes.map((route) => [route.id, Boolean(route.is_loop)]));
   const variantById = new Map(variants.map((variant) => [variant.id, variant]));
   const variantStationIndex = buildVariantStationIndex(variantStops);
+  const variantSequenceOrder = buildVariantSequenceOrder(variantStops);
   const edgeIndex = buildEdgeIndex(edges);
+  const variantSearchOrder = buildVariantSearchOrder(variants, routePriority);
   const allStationIds = Array.from(new Set(variantStops.map((row) => row.station_id)));
   const allStations = await getStationsByIds(allStationIds);
   const stationById = new Map(allStations.map((station) => [station.id, station]));
@@ -680,14 +894,21 @@ export async function planSingleBusTrip({ fromLat, fromLon, toLat, toLon }) {
       .set(Number(row.stop_sequence), point);
   }
 
-  let candidateOptions = findCandidatesByNearestStopExpansion({
-    originCandidates,
-    destinationCandidates,
-    variants,
-    variantStationIndex,
-    edgeIndex,
-    variantStopSequenceToPoint,
-  });
+  let candidateOptions = [];
+  for (const variantPool of variantSearchOrder) {
+    candidateOptions = findCandidatesByNearestStopExpansion({
+      originCandidates,
+      destinationCandidates,
+      variants: variantPool,
+      variantStationIndex,
+      edgeIndex,
+      variantStopSequenceToPoint,
+      variantSequenceOrder,
+      routeIsLoopById,
+      routePriority,
+    });
+    if (candidateOptions.length > 0) break;
+  }
 
   if (candidateOptions.length === 0) {
     const [expandedOriginCandidates, expandedDestinationCandidates] = await Promise.all([
@@ -705,14 +926,20 @@ export async function planSingleBusTrip({ fromLat, fromLon, toLat, toLon }) {
       }),
     ]);
 
-    candidateOptions = findCandidatesByNearestStopExpansion({
-      originCandidates: expandedOriginCandidates,
-      destinationCandidates: expandedDestinationCandidates,
-      variants,
-      variantStationIndex,
-      edgeIndex,
-      variantStopSequenceToPoint,
-    });
+    for (const variantPool of variantSearchOrder) {
+      candidateOptions = findCandidatesByNearestStopExpansion({
+        originCandidates: expandedOriginCandidates,
+        destinationCandidates: expandedDestinationCandidates,
+        variants: variantPool,
+        variantStationIndex,
+        edgeIndex,
+        variantStopSequenceToPoint,
+        variantSequenceOrder,
+        routeIsLoopById,
+        routePriority,
+      });
+      if (candidateOptions.length > 0) break;
+    }
   }
 
   if (candidateOptions.length === 0) {
@@ -727,6 +954,7 @@ export async function planSingleBusTrip({ fromLat, fromLon, toLat, toLon }) {
     shortlist,
     edgeIndex,
     variantStopSequenceToPoint,
+    variantSequenceOrder,
     fromLat,
     fromLon,
     toLat,
@@ -741,7 +969,7 @@ export async function planSingleBusTrip({ fromLat, fromLon, toLat, toLon }) {
   const walkingLegCache = new Map();
 
   let best = null;
-  let bestScore = Number.POSITIVE_INFINITY;
+  let bestAdjustedScore = Number.POSITIVE_INFINITY;
   let bestFinalWalkDistanceM = Number.POSITIVE_INFINITY;
 
   for (const ranked of rankedCandidates) {
@@ -752,9 +980,11 @@ export async function planSingleBusTrip({ fromLat, fromLon, toLat, toLon }) {
           variantId: option.variantId,
           originSeq: option.originSeq,
           destinationSeq: option.destinationSeq,
+          wrapAround: Boolean(option.wrapAround),
         },
         edgeIndex,
         variantStopSequenceToPoint,
+        variantSequenceOrder,
       });
       if (!busSegment) continue;
 
@@ -776,6 +1006,8 @@ export async function planSingleBusTrip({ fromLat, fromLon, toLat, toLon }) {
         busSegment.durationS +
         walkToDestination.durationS +
         WAIT_PENALTY_S;
+      const adjustedTotalScoreS =
+        totalDurationS - (Number(option.priorityBonusS) || 0);
 
       const finalWalkDistanceM =
         Number(walkToDestination.distanceM) || Number.POSITIVE_INFINITY;
@@ -783,7 +1015,8 @@ export async function planSingleBusTrip({ fromLat, fromLon, toLat, toLon }) {
         best &&
         best.option.routeId === option.routeId &&
         best.option.variantId === option.variantId &&
-        best.option.originSeq === option.originSeq;
+        best.option.originSeq === option.originSeq &&
+        Boolean(best.option.wrapAround) === Boolean(option.wrapAround);
 
       let shouldReplace = false;
       if (!best) {
@@ -794,14 +1027,14 @@ export async function planSingleBusTrip({ fromLat, fromLon, toLat, toLon }) {
           shouldReplace = true;
         } else if (
           Math.abs(finalWalkDistanceM - bestFinalWalkDistanceM) <= 1 &&
-          totalDurationS < bestScore
+          adjustedTotalScoreS < bestAdjustedScore
         ) {
           shouldReplace = true;
         }
-      } else if (totalDurationS + 1 < bestScore) {
+      } else if (adjustedTotalScoreS + 1 < bestAdjustedScore) {
         shouldReplace = true;
       } else if (
-        Math.abs(totalDurationS - bestScore) <= 120 &&
+        Math.abs(adjustedTotalScoreS - bestAdjustedScore) <= 120 &&
         finalWalkDistanceM + 5 < bestFinalWalkDistanceM
       ) {
         // If ETA is close, prefer less final walking.
@@ -809,7 +1042,7 @@ export async function planSingleBusTrip({ fromLat, fromLon, toLat, toLon }) {
       }
 
       if (shouldReplace) {
-        bestScore = totalDurationS;
+        bestAdjustedScore = adjustedTotalScoreS;
         bestFinalWalkDistanceM = finalWalkDistanceM;
         best = {
           option,
