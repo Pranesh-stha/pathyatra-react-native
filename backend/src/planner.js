@@ -1021,22 +1021,27 @@ export async function planSingleBusTrip({
   let best = null;
   let bestAdjustedScore = Number.POSITIVE_INFINITY;
   let bestTotalWalkDistanceM = Number.POSITIVE_INFINITY;
+  let bestBusStopCount = Number.POSITIVE_INFINITY;
 
   for (const ranked of rankedCandidates) {
     try {
       const option = ranked.option;
+      const busOption = {
+        variantId: option.variantId,
+        originSeq: option.originSeq,
+        destinationSeq: option.destinationSeq,
+        wrapAround: Boolean(option.wrapAround),
+      };
       const busSegment = await buildBusSegment({
-        option: {
-          variantId: option.variantId,
-          originSeq: option.originSeq,
-          destinationSeq: option.destinationSeq,
-          wrapAround: Boolean(option.wrapAround),
-        },
+        option: busOption,
         edgeIndex,
         variantStopSequenceToPoint,
         variantSequenceOrder,
       });
       if (!busSegment) continue;
+
+      const legPairs = buildLegSequencePairs(busOption, variantSequenceOrder);
+      const busStopCount = legPairs ? legPairs.length + 1 : Number.POSITIVE_INFINITY;
 
       const [walkToBoarding, walkToDestination] = await Promise.all([
         fetchWalkingLegWithCache({
@@ -1104,11 +1109,19 @@ export async function planSingleBusTrip({
       ) {
         // If ETA is close (within 3 min), prefer less total walking.
         shouldReplace = true;
+      } else if (
+        Math.abs(adjustedTotalScoreS - bestAdjustedScore) <= 180 &&
+        Math.abs(totalWalkDistanceM - bestTotalWalkDistanceM) <= 50 &&
+        busStopCount < bestBusStopCount
+      ) {
+        // If ETA and walking are close, prefer fewer bus stops.
+        shouldReplace = true;
       }
 
       if (shouldReplace) {
         bestAdjustedScore = adjustedTotalScoreS;
         bestTotalWalkDistanceM = totalWalkDistanceM;
+        bestBusStopCount = busStopCount;
         best = {
           option,
           busSegment,
